@@ -12,36 +12,34 @@ a non-dev environment, startup fails rather than silently storing plaintext.
 """
 from __future__ import annotations
 
-import logging
-import os
 import sys
 
 import uvicorn
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from claims.api.deps import get_current_user, require_roles
+from claims.api.middleware import RequestIDMiddleware
 from claims.api.routes.auth import router as auth_router
 from claims.api.routes.claims import router as claims_router
 from claims.api.routes.disputes import router as disputes_router
 from claims.api.routes.members import router as members_router
 from claims.infrastructure.database import get_session, init_db
 from claims.infrastructure.encryption import init_encryptor
+from claims.infrastructure.logging import configure_logging, get_logger
 from claims.infrastructure.models import UserORM
 from config import get_settings
 
-# ── Logging ───────────────────────────────────────────────────────────────
-# Structured logging; in prod, swap handler for JSON formatter + CloudWatch/Datadog.
-# PHI fields must NEVER appear in log output. See PHI_SAFE_LOG_FIELDS in config.
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    stream=sys.stdout,
-)
-logger = logging.getLogger(__name__)
-
 settings = get_settings()
+
+# ── Structured logging ────────────────────────────────────────────────────
+# JSON in production (consumed by Promtail → Loki → Grafana).
+# ConsoleRenderer with colours in development.
+# PHI fields (phi_* prefix) are stripped by the logging pipeline before render.
+configure_logging(environment=settings.environment, log_level=settings.log_level)
+logger = get_logger(__name__)
 
 # ── App factory ───────────────────────────────────────────────────────────
 
@@ -64,6 +62,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestIDMiddleware)
+
+# ── Prometheus metrics ────────────────────────────────────────────────────
+# Exposes /metrics endpoint scraped by Prometheus every 10 s.
+# Provides: http_requests_total, http_request_duration_seconds (histogram)
+# Grafana dashboard reads these via the Prometheus data source.
+Instrumentator(
+    should_group_status_codes=False,
+    should_ignore_untemplated=True,
+    excluded_handlers=["/metrics", "/health", "/"],
+).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
 # ── Route registration ────────────────────────────────────────────────────
 app.include_router(auth_router, prefix="/api/v1")
@@ -84,15 +93,15 @@ async def on_startup() -> None:
         sys.exit(1)
 
     logger.info(
-        "Claims service started — env=%s phi_encryption=%s",
-        settings.environment,
-        "active" if settings.phi_encryption_key else "DISABLED (dev mode)",
+        "claims_service_started",
+        env=settings.environment,
+        phi_encryption="active" if settings.phi_encryption_key else "DISABLED_dev_mode",
     )
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
-    logger.info("Claims service shutting down.")
+    logger.info("claims_service_shutdown")
 
 
 # ── Health check ──────────────────────────────────────────────────────────
@@ -182,9 +191,9 @@ async def get_platform_stats(
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     # Log without PHI — only the URL path and exception type
     logger.error(
-        "Unhandled exception: path=%s type=%s",
-        request.url.path,
-        type(exc).__name__,
+        "unhandled_exception",
+        path=request.url.path,
+        exc_type=type(exc).__name__,
     )
     return JSONResponse(
         status_code=500,

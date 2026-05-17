@@ -1,0 +1,101 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ClaimsIQ Observability Stack — PLG (Prometheus + Loki + Grafana)
+#
+# Run alongside the main compose file:
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+#
+# Or add the alias in your shell:
+#   alias dcobs='docker compose -f docker-compose.yml -f docker-compose.observability.yml'
+#
+# Access:
+#   Grafana    http://localhost:3001  (admin / admin)
+#   Prometheus http://localhost:9090
+#   Loki       http://localhost:3100  (internal — queried via Grafana)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Prometheus — metrics scraping & storage ────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: claims-prometheus
+    volumes:
+      - ./infrastructure/observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle            # POST /-/reload to reload config
+      - --web.console.libraries=/etc/prometheus/console_libraries
+      - --web.console.templates=/etc/prometheus/consoles
+    ports:
+      - "9090:9090"
+    networks:
+      - realfast_default                  # share network with main compose
+    restart: unless-stopped
+
+  # ── Loki — log aggregation backend ────────────────────────────────────
+  loki:
+    image: grafana/loki:2.9.4
+    container_name: claims-loki
+    volumes:
+      - ./infrastructure/observability/loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    networks:
+      - realfast_default
+    restart: unless-stopped
+
+  # ── Promtail — ships Docker container logs → Loki ─────────────────────
+  promtail:
+    image: grafana/promtail:2.9.4
+    container_name: claims-promtail
+    volumes:
+      - ./infrastructure/observability/promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    networks:
+      - realfast_default
+    restart: unless-stopped
+
+  # ── Grafana — unified metrics + logs UI ────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: claims-grafana
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infrastructure/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infrastructure/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SERVER_ROOT_URL: "http://localhost:3001"
+      GF_EXPLORE_ENABLED: "true"
+      GF_ALERTING_ENABLED: "true"
+    depends_on:
+      - prometheus
+      - loki
+    networks:
+      - realfast_default
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  loki_data:
+  grafana_data:
+
+networks:
+  realfast_default:
+    external: true

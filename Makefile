@@ -6,7 +6,8 @@
 .PHONY: help dev down logs db-shell \
         migrate migrate-new migrate-rollback migrate-history \
         test test-backend test-frontend lint type-check \
-        build push seed
+        build push seed \
+        obs obs-down obs-logs grafana prometheus
 
 # ── Default ───────────────────────────────────────────────────────────────────
 help:
@@ -33,6 +34,13 @@ help:
 	@echo "  Build"
 	@echo "    make build            Build Docker images"
 	@echo "    make seed             Seed demo data (dev only)"
+	@echo ""
+	@echo "  Observability (Prometheus + Loki + Grafana)"
+	@echo "    make obs              Start full stack + observability"
+	@echo "    make obs-down         Stop observability stack"
+	@echo "    make obs-logs         Tail observability container logs"
+	@echo "    make grafana          Open Grafana  (http://localhost:3001)"
+	@echo "    make prometheus       Open Prometheus (http://localhost:9090)"
 	@echo ""
 
 # ── Development ───────────────────────────────────────────────────────────────
@@ -104,6 +112,27 @@ lint:
 # ── Build ─────────────────────────────────────────────────────────────────────
 build:
 	docker compose build
+
+# ── Observability stack ───────────────────────────────────────────────────────
+# Start Prometheus + Loki + Grafana alongside the main app
+obs:
+	docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
+
+# Stop the observability stack only
+obs-down:
+	docker compose -f docker-compose.yml -f docker-compose.observability.yml down
+
+# Tail observability container logs
+obs-logs:
+	docker compose -f docker-compose.yml -f docker-compose.observability.yml logs -f prometheus loki grafana promtail
+
+# Open Grafana in the browser
+grafana:
+	open http://localhost:3001
+
+# Open Prometheus expression browser
+prometheus:
+	open http://localhost:9090
 
 # ── Seed ──────────────────────────────────────────────────────────────────────
 seed:

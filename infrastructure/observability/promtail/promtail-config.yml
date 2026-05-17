@@ -1,0 +1,67 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+
+  # Ship all Docker container logs to Loki, labelled by container name
+  - job_name: docker_containers
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: docker
+          __path__: /var/lib/docker/containers/*/*-json.log
+
+    pipeline_stages:
+      # Parse Docker JSON log wrapper
+      - json:
+          expressions:
+            output: log
+            stream: stream
+            attrs: attrs
+
+      - json:
+          expressions:
+            tag: attrs.tag
+          source: attrs
+
+      # Extract container name from tag (format: <name>/<id>)
+      - regex:
+          expression: '(?P<container_name>(?:[^|]*[^|]))'
+          source: tag
+
+      # Attach container_name as a label for easy filtering in Grafana
+      - labels:
+          stream:
+          container_name:
+
+      # Use the actual log message as the log line
+      - output:
+          source: output
+
+      # Parse JSON-formatted log lines from structlog (backend)
+      - match:
+          selector: '{container_name="claims-backend"}'
+          stages:
+            - json:
+                expressions:
+                  level: level
+                  event: event
+                  request_id: request_id
+                  path: path
+                  status_code: status_code
+            - labels:
+                level:
+            - metrics:
+                log_lines_total:
+                  type: Counter
+                  description: Total log lines by level
+                  source: level
+                  config:
+                    action: inc
