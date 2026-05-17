@@ -41,8 +41,8 @@ services:
   # ── Backend (FastAPI) ──────────────────────────────────────────────────
   backend:
     build:
-      context: ./app/backend
-      dockerfile: ../../infrastructure/docker/Dockerfile.backend
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.backend
     container_name: claims-backend
     ports:
       - "8000:8000"
@@ -63,6 +63,7 @@ services:
         condition: service_healthy
     volumes:
       - ./app/backend:/app  # hot reload in dev
+    user: root              # dev only — prod Dockerfile uses non-root
     command: >
       sh -c "
         cd /app &&
@@ -78,8 +79,8 @@ services:
   # ── Frontend (Next.js) ─────────────────────────────────────────────────
   frontend:
     build:
-      context: ./app/frontend
-      dockerfile: ../../infrastructure/docker/Dockerfile.frontend
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.frontend
     container_name: claims-frontend
     ports:
       - "3000:3000"
