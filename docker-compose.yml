@@ -89,10 +89,8 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-    volumes:
-      - ./app/frontend:/app
-      - /app/node_modules
-      - /app/.next
+    # Note: no volume mount for frontend — standalone build bakes everything in.
+    # For hot-reload in dev, run: cd app/frontend && npm run dev
 
   # ── Kafka (optional — event streaming) ────────────────────────────────
   # Uncomment to enable Kafka-based domain event publishing.
