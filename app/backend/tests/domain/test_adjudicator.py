@@ -6,9 +6,12 @@ Each test describes a real-world scenario:
 
 These tests drove the adjudicator implementation (written first).
 """
+from __future__ import annotations
+
 import uuid
 from datetime import date, timedelta
 from decimal import Decimal
+from typing import List, Optional
 
 import pytest
 
@@ -61,11 +64,11 @@ def make_rule(
     policy: Policy,
     service_type: ServiceType = ServiceType.SPECIALIST_VISIT,
     coverage_pct: str = "80",
-    annual_limit: str | None = "2000.00",
-    per_visit_limit: str | None = "300.00",
-    copay: str | None = "30.00",
+    annual_limit: Optional[str] = "2000.00",
+    per_visit_limit: Optional[str] = "300.00",
+    copay: Optional[str] = "30.00",
     requires_preauth: bool = False,
-    excluded_dx: list[str] | None = None,
+    excluded_dx: Optional[List[str]] = None,
 ) -> CoverageRule:
     rule = CoverageRule(
         id=uuid.uuid4(),
@@ -86,7 +89,7 @@ def make_rule(
 def make_line_item(
     service_type: ServiceType = ServiceType.SPECIALIST_VISIT,
     billed: str = "250.00",
-    service_date: date | None = None,
+    service_date: Optional[date] = None,
     diagnosis: str = "M54.5",     # Low back pain
     procedure: str = "99213",
 ) -> LineItem:
@@ -431,11 +434,13 @@ class TestMoney:
 
 
 class TestDiagnosisCode:
-    def test_valid_icd10_without_decimal(self):
+    def test_valid_icd10_with_decimal(self):
         from claims.domain.value_objects import DiagnosisCode
-        code = DiagnosisCode("M545")
-        # M545 doesn't match because it needs 2 digits after first letter
-        # Actually M54.5 is valid. Let me test a valid one
+        code = DiagnosisCode("M54.5")
+        assert code.code == "M54.5"
+
+    def test_valid_icd10_without_decimal_subcode(self):
+        from claims.domain.value_objects import DiagnosisCode
         code = DiagnosisCode("Z00.00")
         assert code.code == "Z00.00"
 
