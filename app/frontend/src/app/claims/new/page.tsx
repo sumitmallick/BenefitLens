@@ -46,7 +46,7 @@ function ClaimFormInner() {
   const [claimNumber, setClaimNumber] = useState("");
   const [lineItems, setLineItems] = useState<LineItemForm[]>([makeEmptyLine(keyCounter++)]);
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<unknown>(null);
+  const [error, setError] = useState<Error | null>(null);
 
   const addLine = useCallback(() => {
     setLineItems((prev) => [...prev, makeEmptyLine(keyCounter++)]);
@@ -110,7 +110,7 @@ function ClaimFormInner() {
       const claim = await claimsApi.submit(payload);
       router.push(`/claims/${claim.id}`);
     } catch (err) {
-      setError(err);
+      setError(err instanceof Error ? err : new Error(String(err)));
       setSubmitting(false);
     }
   };

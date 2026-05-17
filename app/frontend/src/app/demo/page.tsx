@@ -87,7 +87,7 @@ const COVERAGE_RULES = [
 
 export default function DemoSetupPage() {
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<unknown>(null);
+  const [error, setError] = useState<Error | null>(null);
   const [result, setResult] = useState<DemoResult | null>(null);
 
   const runSetup = async () => {
@@ -118,7 +118,7 @@ export default function DemoSetupPage() {
 
       setResult({ member, policy });
     } catch (err) {
-      setError(err);
+      setError(err instanceof Error ? err : new Error(String(err)));
     } finally {
       setLoading(false);
     }

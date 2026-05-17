@@ -73,7 +73,7 @@ export default function DisputePage() {
   const [reason, setReason] = useState("");
   const [description, setDescription] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState<unknown>(null);
+  const [submitError, setSubmitError] = useState<Error | null>(null);
   const [success, setSuccess] = useState(false);
 
   const {
@@ -116,7 +116,7 @@ export default function DisputePage() {
       setDescription("");
       await refetchDisputes();
     } catch (err) {
-      setSubmitError(err);
+      setSubmitError(err instanceof Error ? err : new Error(String(err)));
     } finally {
       setSubmitting(false);
     }
