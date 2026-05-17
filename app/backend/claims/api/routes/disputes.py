@@ -11,6 +11,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from claims.api.deps import get_current_user, require_roles
 from claims.api.schemas import DisputeResponse, ResolveDisputeRequest, SubmitDisputeRequest
 from claims.application.services import (
     ClaimNotFound,
@@ -22,6 +23,7 @@ from claims.application.services import (
 from claims.domain.entities import Dispute
 from claims.domain.state_machines import InvalidTransition
 from claims.infrastructure.database import get_session
+from claims.infrastructure.models import UserORM
 from claims.infrastructure.repositories import DisputeRepository
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,7 @@ async def submit_dispute_endpoint(
     claim_id: uuid.UUID,
     request: SubmitDisputeRequest,
     session: AsyncSession = Depends(get_session),
+    current_user: UserORM = Depends(get_current_user),
 ) -> DisputeResponse:
     cmd = SubmitDisputeCommand(
         claim_id=claim_id,
@@ -80,6 +83,7 @@ async def resolve_dispute_endpoint(
     dispute_id: uuid.UUID,
     request: ResolveDisputeRequest,
     session: AsyncSession = Depends(get_session),
+    current_user: UserORM = Depends(require_roles("ADMIN", "CLAIM_PROCESSOR")),
 ) -> DisputeResponse:
     try:
         dispute = await resolve_dispute(

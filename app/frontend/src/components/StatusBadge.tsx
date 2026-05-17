@@ -4,6 +4,10 @@ type AnyStatus = ClaimStatus | LineItemStatus | DisputeStatus | string;
 
 const statusConfig: Record<string, { label: string; classes: string }> = {
   // Claim statuses
+  SUBMITTED: {
+    label: "Submitted",
+    classes: "bg-blue-100 text-blue-700 border border-blue-200",
+  },
   APPROVED: {
     label: "Approved",
     classes: "bg-green-100 text-green-800 border border-green-200",
@@ -27,6 +31,14 @@ const statusConfig: Record<string, { label: string; classes: string }> = {
   UNDER_REVIEW: {
     label: "Under Review",
     classes: "bg-blue-100 text-blue-800 border border-blue-200",
+  },
+  PAID: {
+    label: "Paid",
+    classes: "bg-green-100 text-green-900 border border-green-300",
+  },
+  VOIDED: {
+    label: "Voided",
+    classes: "bg-gray-100 text-gray-500 border border-gray-200",
   },
   // Line item statuses
   COVERED: {

@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     enable_kafka: bool = Field(default=False)
     enable_redis_cache: bool = Field(default=True)
 
+    # JWT Authentication
+    jwt_secret_key: str = Field(
+        default="dev-secret-change-in-production-min-32-chars!!",
+        description="Secret key for signing JWT tokens. MUST be changed in production.",
+    )
+    jwt_algorithm: str = Field(default="HS256")
+    jwt_access_token_expire_minutes: int = Field(default=60 * 24)  # 24 hours
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     @property

@@ -28,9 +28,11 @@ function formatDate(dateStr: string) {
 }
 
 function LineItemRow({ item }: { item: AdjudicatedLineItem }) {
+  const billedAmount = parseFloat(item.billed_amount);
+  const coveredAmount = parseFloat(item.adjudication?.covered_amount ?? "0");
   const coverageRatio =
-    item.billed_amount > 0
-      ? Math.min((item.covered_amount / item.billed_amount) * 100, 100)
+    billedAmount > 0
+      ? Math.min((coveredAmount / billedAmount) * 100, 100)
       : 0;
 
   return (
@@ -75,18 +77,18 @@ function LineItemRow({ item }: { item: AdjudicatedLineItem }) {
       <div className="grid grid-cols-3 gap-4 pt-2 border-t border-gray-100">
         <div>
           <p className="text-xs text-gray-400 mb-0.5">Billed</p>
-          <p className="font-semibold text-gray-900">{formatCurrency(item.billed_amount)}</p>
+          <p className="font-semibold text-gray-900">{formatCurrency(billedAmount)}</p>
         </div>
         <div>
           <p className="text-xs text-gray-400 mb-0.5">Covered</p>
-          <p className={`font-semibold ${item.covered_amount > 0 ? "text-green-700" : "text-red-600"}`}>
-            {formatCurrency(item.covered_amount)}
+          <p className={`font-semibold ${coveredAmount > 0 ? "text-green-700" : "text-red-600"}`}>
+            {formatCurrency(coveredAmount)}
           </p>
         </div>
         <div>
           <p className="text-xs text-gray-400 mb-0.5">Member Owes</p>
           <p className="font-semibold text-gray-700">
-            {formatCurrency(item.billed_amount - item.covered_amount)}
+            {formatCurrency(billedAmount - coveredAmount)}
           </p>
         </div>
       </div>
@@ -112,16 +114,16 @@ function LineItemRow({ item }: { item: AdjudicatedLineItem }) {
       </div>
 
       {/* Denial reason / explanation */}
-      {item.denial_reason && (
+      {item.adjudication?.denial_reason && (
         <div className="rounded-lg bg-red-50 border border-red-100 p-3 text-sm text-red-700">
           <span className="font-medium">Denial reason: </span>
-          {item.denial_reason}
+          {item.adjudication.denial_reason}
         </div>
       )}
-      {item.explanation && !item.denial_reason && (
+      {item.adjudication?.explanation && !item.adjudication?.denial_reason && (
         <div className="rounded-lg bg-blue-50 border border-blue-100 p-3 text-sm text-blue-700">
           <span className="font-medium">Note: </span>
-          {item.explanation}
+          {item.adjudication.explanation}
         </div>
       )}
     </div>
@@ -159,10 +161,12 @@ export default function ClaimDetailPage() {
 
   if (!claim) return null;
 
-  const memberOwes = claim.total_billed - claim.total_covered;
+  const totalBilled = parseFloat(claim.total_billed);
+  const totalCovered = parseFloat(claim.total_covered);
+  const memberOwes = totalBilled - totalCovered;
   const coveragePct =
-    claim.total_billed > 0
-      ? ((claim.total_covered / claim.total_billed) * 100).toFixed(1)
+    totalBilled > 0
+      ? ((totalCovered / totalBilled) * 100).toFixed(1)
       : "0";
 
   return (
@@ -183,7 +187,7 @@ export default function ClaimDetailPage() {
               <StatusBadge status={claim.status} size="lg" />
             </div>
             <p className="text-sm text-gray-500">
-              Submitted {formatDate(claim.submission_date)} &bull; Claim ID:{" "}
+              Submitted {formatDate(claim.submitted_at)} &bull; Claim ID:{" "}
               <code className="font-mono text-xs bg-gray-100 px-1.5 py-0.5 rounded">{claim.id}</code>
             </p>
           </div>
@@ -212,13 +216,13 @@ export default function ClaimDetailPage() {
           <div className="rounded-xl bg-gray-50 p-4">
             <p className="text-xs text-gray-400 mb-1">Total Billed</p>
             <p className="text-xl font-bold text-gray-900">
-              {formatCurrency(claim.total_billed)}
+              {formatCurrency(totalBilled)}
             </p>
           </div>
           <div className="rounded-xl bg-green-50 p-4">
             <p className="text-xs text-gray-400 mb-1">Total Covered</p>
             <p className="text-xl font-bold text-green-700">
-              {formatCurrency(claim.total_covered)}
+              {formatCurrency(totalCovered)}
             </p>
           </div>
           <div className="rounded-xl bg-orange-50 p-4">
@@ -233,12 +237,6 @@ export default function ClaimDetailPage() {
           </div>
         </div>
 
-        {claim.adjudication_notes && (
-          <div className="mt-4 rounded-lg bg-amber-50 border border-amber-100 p-4 text-sm text-amber-800">
-            <span className="font-semibold">Adjudication Notes: </span>
-            {claim.adjudication_notes}
-          </div>
-        )}
       </div>
 
       {/* Line Items */}

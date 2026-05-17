@@ -11,7 +11,7 @@ import uuid
 from decimal import Decimal
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from claims.api.schemas import (
@@ -34,6 +34,9 @@ from claims.application.services import (
     submit_claim,
     SubmitClaimCommand,
 )
+from claims.api.deps import get_current_user, require_roles
+from claims.infrastructure.repositories import ClaimRepository
+from claims.infrastructure.models import UserORM
 from claims.domain.entities import AdjudicationResult, Claim, LineItem
 from claims.domain.state_machines import InvalidTransition
 from claims.infrastructure.database import get_session
@@ -119,6 +122,37 @@ def _claim_detail_response(claim: Claim) -> ClaimDetailResponse:
 
 # ── Routes ────────────────────────────────────────────────────────────────
 
+@router.get(
+    "/",
+    response_model=List[ClaimResponse],
+    summary="List claims — scope filtered by caller's role",
+)
+async def list_all_claims_endpoint(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    session: AsyncSession = Depends(get_session),
+    current_user: UserORM = Depends(get_current_user),
+) -> List[ClaimResponse]:
+    repo = ClaimRepository(session)
+
+    if current_user.role in ("ADMIN", "CLAIM_PROCESSOR"):
+        claims = await repo.list_all(limit=limit, offset=offset)
+    elif current_user.role == "PATIENT":
+        if not current_user.member_id:
+            return []
+        claims = await list_claims_for_member(current_user.member_id, session)
+    elif current_user.role == "PROVIDER":
+        if not current_user.provider_npi:
+            return []
+        claims = await repo.list_by_provider_npi(
+            current_user.provider_npi, limit=limit, offset=offset
+        )
+    else:
+        return []
+
+    return [_claim_response(c) for c in claims]
+
+
 @router.post(
     "/",
     response_model=ClaimDetailResponse,
@@ -127,12 +161,14 @@ def _claim_detail_response(claim: Claim) -> ClaimDetailResponse:
     description=(
         "Submit a claim with one or more line items. "
         "Adjudication runs synchronously and the response includes "
-        "the adjudication result for each line item."
+        "the adjudication result for each line item. "
+        "Allowed roles: ADMIN, CLAIM_PROCESSOR, PROVIDER."
     ),
 )
 async def submit_claim_endpoint(
     request: SubmitClaimRequest,
     session: AsyncSession = Depends(get_session),
+    current_user: UserORM = Depends(require_roles("ADMIN", "CLAIM_PROCESSOR", "PROVIDER")),
 ) -> ClaimDetailResponse:
     cmd = SubmitClaimCommand(
         member_id=request.member_id,
@@ -167,11 +203,21 @@ async def submit_claim_endpoint(
 async def get_claim_endpoint(
     claim_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
+    current_user: UserORM = Depends(get_current_user),
 ) -> ClaimDetailResponse:
     try:
         claim = await get_claim(claim_id, session)
     except ClaimNotFound as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+    # Patients can only view their own claims
+    if current_user.role == "PATIENT":
+        if current_user.member_id != claim.member_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    # Providers can only view claims they submitted
+    elif current_user.role == "PROVIDER":
+        if current_user.provider_npi != claim.provider_npi:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     logger.info("Claim detail accessed: claim_number=%s", claim.claim_number)
     return _claim_detail_response(claim)
@@ -193,11 +239,12 @@ async def list_member_claims_endpoint(
 @router.post(
     "/{claim_id}/pay",
     response_model=ClaimDetailResponse,
-    summary="Mark an approved claim as paid",
+    summary="Mark an approved claim as paid (ADMIN / CLAIM_PROCESSOR only)",
 )
 async def mark_paid_endpoint(
     claim_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
+    current_user: UserORM = Depends(require_roles("ADMIN", "CLAIM_PROCESSOR")),
 ) -> ClaimDetailResponse:
     try:
         claim = await mark_claim_paid(claim_id, session)

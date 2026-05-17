@@ -17,15 +17,18 @@ import os
 import sys
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from claims.api.deps import get_current_user, require_roles
+from claims.api.routes.auth import router as auth_router
 from claims.api.routes.claims import router as claims_router
 from claims.api.routes.disputes import router as disputes_router
 from claims.api.routes.members import router as members_router
-from claims.infrastructure.database import init_db
+from claims.infrastructure.database import get_session, init_db
 from claims.infrastructure.encryption import init_encryptor
+from claims.infrastructure.models import UserORM
 from config import get_settings
 
 # ── Logging ───────────────────────────────────────────────────────────────
@@ -63,6 +66,7 @@ app.add_middleware(
 )
 
 # ── Route registration ────────────────────────────────────────────────────
+app.include_router(auth_router, prefix="/api/v1")
 app.include_router(claims_router, prefix="/api/v1")
 app.include_router(disputes_router, prefix="/api/v1")
 app.include_router(members_router, prefix="/api/v1")
@@ -101,6 +105,75 @@ async def health() -> dict:
 @app.get("/", tags=["Health"])
 async def root() -> dict:
     return {"service": "claims-processing-api", "docs": "/docs"}
+
+
+# ── Platform statistics ───────────────────────────────────────────────────
+
+@app.get("/api/v1/stats", tags=["Analytics"])
+async def get_platform_stats(
+    session=Depends(get_session),
+    current_user: UserORM = Depends(require_roles("ADMIN", "CLAIM_PROCESSOR")),
+) -> dict:
+    """
+    Aggregate statistics for the claims platform dashboard.
+    Returns counts by entity type and claims breakdown by status.
+    No PHI is returned — all values are aggregate counts/rates.
+    """
+    from sqlalchemy import func as sqlfunc, select, case
+    from claims.infrastructure.models import ClaimORM, MemberORM, PolicyORM
+    from datetime import date, timedelta
+
+    today = date.today()
+    month_start = today.replace(day=1)
+
+    # Claims stats with status breakdown
+    claims_result = await session.execute(
+        select(
+            sqlfunc.count(ClaimORM.id).label("total"),
+            sqlfunc.sum(case((ClaimORM.status == "APPROVED", 1), else_=0)).label("approved"),
+            sqlfunc.sum(case((ClaimORM.status == "PARTIALLY_APPROVED", 1), else_=0)).label("partially_approved"),
+            sqlfunc.sum(case((ClaimORM.status == "DENIED", 1), else_=0)).label("denied"),
+            sqlfunc.sum(case((ClaimORM.status == "SUBMITTED", 1), else_=0)).label("submitted"),
+            sqlfunc.sum(case((ClaimORM.status == "UNDER_REVIEW", 1), else_=0)).label("under_review"),
+            sqlfunc.sum(case((ClaimORM.status == "DISPUTED", 1), else_=0)).label("disputed"),
+            sqlfunc.sum(case((ClaimORM.status == "PAID", 1), else_=0)).label("paid"),
+            sqlfunc.sum(case((ClaimORM.submitted_at >= month_start, 1), else_=0)).label("this_month"),
+        )
+    )
+    cr = claims_result.one()
+
+    total = int(cr.total or 0)
+    approved = int(cr.approved or 0)
+    partially = int(cr.partially_approved or 0)
+    denied = int(cr.denied or 0)
+    adjudicated = approved + partially + denied
+    approval_rate = round((approved + partially) / adjudicated * 100, 1) if adjudicated > 0 else 0.0
+
+    # Member and policy counts
+    member_count = await session.scalar(select(sqlfunc.count(MemberORM.id))) or 0
+    policy_count = await session.scalar(select(sqlfunc.count(PolicyORM.id))) or 0
+    active_policy_count = await session.scalar(
+        select(sqlfunc.count(PolicyORM.id)).where(PolicyORM.status == "ACTIVE")
+    ) or 0
+
+    return {
+        "members": {"total": member_count},
+        "policies": {"total": policy_count, "active": active_policy_count},
+        "claims": {
+            "total": total,
+            "this_month": int(cr.this_month or 0),
+            "by_status": {
+                "APPROVED": approved,
+                "PARTIALLY_APPROVED": partially,
+                "DENIED": denied,
+                "SUBMITTED": int(cr.submitted or 0),
+                "UNDER_REVIEW": int(cr.under_review or 0),
+                "DISPUTED": int(cr.disputed or 0),
+                "PAID": int(cr.paid or 0),
+            },
+        },
+        "approval_rate": approval_rate,
+    }
 
 
 # ── Global error handler ──────────────────────────────────────────────────

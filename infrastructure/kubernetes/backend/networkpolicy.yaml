@@ -1,0 +1,108 @@
+---
+# Default deny-all ingress policy for the claims namespace.
+# Applied first; subsequent policies add explicit allow rules.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: claims
+  labels:
+    app.kubernetes.io/part-of: claims-processing
+spec:
+  podSelector: {}       # applies to ALL pods in the namespace
+  policyTypes:
+    - Ingress
+---
+# Default deny-all egress policy for the claims namespace.
+# Explicit egress rules below permit only required outbound connections.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: claims
+  labels:
+    app.kubernetes.io/part-of: claims-processing
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+---
+# Allow ingress to claims-backend only from the ingress-nginx controller.
+# Egress: DNS + PostgreSQL + Redis + Kafka.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: claims-backend-netpol
+  namespace: claims
+  labels:
+    app: claims-backend
+    app.kubernetes.io/part-of: claims-processing
+spec:
+  podSelector:
+    matchLabels:
+      app: claims-backend
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Only the NGINX ingress controller may reach the backend on port 8000.
+    # All other sources (other namespaces, external IPs) are blocked.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8000
+
+  egress:
+    # DNS — kube-dns in kube-system (UDP + TCP for large responses)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # PostgreSQL — RDS (via AWS PrivateLink/VPC) or in-cluster postgres
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 5432
+
+    # Redis — ElastiCache (AWS) or in-cluster redis service
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 6379
+
+    # Kafka — MSK TLS port (AWS) or in-cluster Kafka
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 9092     # Plaintext (allowed at network layer; MSK enforces TLS at app layer)
+        - protocol: TCP
+          port: 9094     # TLS broker port
+
+    # AWS API endpoints over HTTPS (KMS, Secrets Manager, etc.)
+    # These calls leave the cluster via NAT gateway, so we allow HTTPS egress.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443

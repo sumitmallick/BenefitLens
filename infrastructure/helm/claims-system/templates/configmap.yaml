@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "claims-system.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "claims-system.labels" . | nindent 4 }}
+data:
+  ENVIRONMENT: {{ .Values.configmap.environment | default "production" | quote }}
+  LOG_LEVEL: {{ .Values.configmap.logLevel | default "INFO" | quote }}
+  ENABLE_KAFKA: {{ .Values.configmap.enableKafka | default "true" | quote }}
+  KAFKA_BOOTSTRAP_SERVERS: {{ .Values.configmap.kafkaBootstrapServers | default "" | quote }}
+  ENABLE_REDIS_CACHE: {{ .Values.configmap.enableRedisCache | default "true" | quote }}
+  {{- with .Values.configmap.extra }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}

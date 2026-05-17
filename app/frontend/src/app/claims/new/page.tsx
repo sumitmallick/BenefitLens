@@ -43,7 +43,8 @@ function ClaimFormInner() {
 
   const [memberId, setMemberId] = useState(searchParams.get("member_id") ?? "");
   const [policyId, setPolicyId] = useState(searchParams.get("policy_id") ?? "");
-  const [claimNumber, setClaimNumber] = useState("");
+  const [providerName, setProviderName] = useState("");
+  const [providerNpi, setProviderNpi] = useState("");
   const [lineItems, setLineItems] = useState<LineItemForm[]>([makeEmptyLine(keyCounter++)]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<Error | null>(null);
@@ -78,6 +79,14 @@ function ClaimFormInner() {
       setError(new Error("Policy ID is required."));
       return;
     }
+    if (!providerName.trim()) {
+      setError(new Error("Provider name is required."));
+      return;
+    }
+    if (!/^\d{10}$/.test(providerNpi.trim())) {
+      setError(new Error("Provider NPI must be exactly 10 digits."));
+      return;
+    }
     if (lineItems.length === 0) {
       setError(new Error("At least one line item is required."));
       return;
@@ -98,12 +107,12 @@ function ClaimFormInner() {
       const payload = {
         member_id: memberId.trim(),
         policy_id: policyId.trim(),
-        ...(claimNumber.trim() ? { claim_number: claimNumber.trim() } : {}),
-        submission_date: new Date().toISOString().split("T")[0],
+        provider_name: providerName.trim(),
+        provider_npi: providerNpi.trim(),
         line_items: lineItems.map(({ _key, ...rest }) => ({
           ...rest,
-          procedure_code: rest.procedure_code || undefined,
-          description: rest.description || undefined,
+          procedure_code: rest.procedure_code || "00000",
+          description: rest.description || "",
         })),
       };
 
@@ -174,16 +183,32 @@ function ClaimFormInner() {
               />
             </div>
             <div>
-              <label className="label" htmlFor="claimNumber">
-                Claim Number <span className="text-gray-400 font-normal">(optional)</span>
+              <label className="label" htmlFor="providerName">
+                Provider Name <span className="text-red-500">*</span>
               </label>
               <input
-                id="claimNumber"
+                id="providerName"
                 type="text"
                 className="input"
-                placeholder="Auto-generated if left blank"
-                value={claimNumber}
-                onChange={(e) => setClaimNumber(e.target.value)}
+                placeholder="e.g. City Medical Center"
+                value={providerName}
+                onChange={(e) => setProviderName(e.target.value)}
+                required
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="providerNpi">
+                Provider NPI <span className="text-red-500">*</span>
+              </label>
+              <input
+                id="providerNpi"
+                type="text"
+                className="input"
+                placeholder="10-digit NPI (e.g. 1234567890)"
+                value={providerNpi}
+                onChange={(e) => setProviderNpi(e.target.value)}
+                maxLength={10}
+                required
               />
             </div>
           </div>

@@ -171,6 +171,16 @@ class MemberRepository:
         result = await self._session.get(MemberORM, member_id)
         return _map_member(result) if result else None
 
+    async def list_all(self, limit: int = 100, offset: int = 0) -> List[Member]:
+        stmt = select(MemberORM).order_by(MemberORM.created_at.desc()).limit(limit).offset(offset)
+        result = await self._session.execute(stmt)
+        return [_map_member(m) for m in result.scalars().all()]
+
+    async def count(self) -> int:
+        from sqlalchemy import func as sqlfunc
+        result = await self._session.execute(select(sqlfunc.count(MemberORM.id)))
+        return result.scalar_one()
+
     async def save(self, member: Member) -> None:
         enc = get_encryptor()
         existing = await self._session.get(MemberORM, member.id)
@@ -202,6 +212,23 @@ class PolicyRepository:
         stmt = select(PolicyORM).where(PolicyORM.member_id == member_id)
         result = await self._session.execute(stmt)
         return [_map_policy(p) for p in result.scalars().all()]
+
+    async def list_all(self, limit: int = 100, offset: int = 0) -> List[Policy]:
+        stmt = select(PolicyORM).order_by(PolicyORM.created_at.desc()).limit(limit).offset(offset)
+        result = await self._session.execute(stmt)
+        return [_map_policy(p) for p in result.scalars().all()]
+
+    async def count(self) -> int:
+        from sqlalchemy import func as sqlfunc
+        result = await self._session.execute(select(sqlfunc.count(PolicyORM.id)))
+        return result.scalar_one()
+
+    async def count_active(self) -> int:
+        from sqlalchemy import func as sqlfunc
+        result = await self._session.execute(
+            select(sqlfunc.count(PolicyORM.id)).where(PolicyORM.status == "ACTIVE")
+        )
+        return result.scalar_one()
 
     async def save(self, policy: Policy) -> None:
         existing = await self._session.get(PolicyORM, policy.id)
@@ -318,6 +345,22 @@ class ClaimRepository:
 
     async def list_by_member(self, member_id: uuid.UUID) -> List[Claim]:
         stmt = select(ClaimORM).where(ClaimORM.member_id == member_id).order_by(ClaimORM.submitted_at.desc())
+        result = await self._session.execute(stmt)
+        return [_map_claim(c) for c in result.scalars().all()]
+
+    async def list_all(self, limit: int = 50, offset: int = 0) -> List[Claim]:
+        stmt = select(ClaimORM).order_by(ClaimORM.submitted_at.desc()).limit(limit).offset(offset)
+        result = await self._session.execute(stmt)
+        return [_map_claim(c) for c in result.scalars().all()]
+
+    async def list_by_provider_npi(self, provider_npi: str, limit: int = 50, offset: int = 0) -> List[Claim]:
+        stmt = (
+            select(ClaimORM)
+            .where(ClaimORM.provider_npi == provider_npi)
+            .order_by(ClaimORM.submitted_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
         result = await self._session.execute(stmt)
         return [_map_claim(c) for c in result.scalars().all()]
 

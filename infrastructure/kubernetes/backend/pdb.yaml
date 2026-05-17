@@ -1,0 +1,16 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: claims-backend-pdb
+  namespace: claims
+  labels:
+    app: claims-backend
+    app.kubernetes.io/part-of: claims-processing
+spec:
+  # Guarantee at least 2 backend pods remain healthy during voluntary disruptions
+  # (node drains, cluster upgrades, rolling restarts). With 3 replicas this means
+  # only one pod can be evicted at a time, keeping the service available.
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: claims-backend

@@ -16,6 +16,8 @@ function formatCurrency(amount: number) {
 }
 
 function ExplanationCard({ item }: { item: LineItemExplanation }) {
+  const billedAmount = parseFloat(item.billed_amount);
+  const coveredAmount = parseFloat(item.covered_amount);
   return (
     <div className="border border-gray-200 rounded-xl overflow-hidden">
       {/* Card header */}
@@ -36,16 +38,16 @@ function ExplanationCard({ item }: { item: LineItemExplanation }) {
         </div>
         <div className="flex items-center gap-4 text-sm">
           <span className="text-gray-500">
-            Billed: <span className="font-semibold text-gray-800">{formatCurrency(item.billed_amount)}</span>
+            Billed: <span className="font-semibold text-gray-800">{formatCurrency(billedAmount)}</span>
           </span>
           <span className="text-gray-500">
             Covered:{" "}
             <span
               className={`font-semibold ${
-                item.covered_amount > 0 ? "text-green-700" : "text-red-600"
+                coveredAmount > 0 ? "text-green-700" : "text-red-600"
               }`}
             >
-              {formatCurrency(item.covered_amount)}
+              {formatCurrency(coveredAmount)}
             </span>
           </span>
         </div>
@@ -60,16 +62,6 @@ function ExplanationCard({ item }: { item: LineItemExplanation }) {
           </p>
           <p className="text-sm text-gray-700 leading-relaxed">{item.explanation}</p>
         </div>
-
-        {/* Policy rule */}
-        {item.policy_rule_applied && (
-          <div className="rounded-lg bg-blue-50 border border-blue-100 p-3">
-            <p className="text-xs font-semibold text-blue-600 uppercase tracking-wide mb-1">
-              Policy Rule Applied
-            </p>
-            <p className="text-sm text-blue-800">{item.policy_rule_applied}</p>
-          </div>
-        )}
 
         {/* Denial reason */}
         {item.denial_reason && (
@@ -146,7 +138,7 @@ export default function ClaimExplainPage() {
               <span className="text-sm text-gray-500">
                 Claim {explanation.claim_number}
               </span>
-              <StatusBadge status={explanation.overall_status} size="md" />
+              <StatusBadge status={explanation.claim_status} size="md" />
             </div>
           </div>
           <Link href={`/claims/${id}`} className="btn-secondary">
@@ -157,15 +149,21 @@ export default function ClaimExplainPage() {
           </Link>
         </div>
 
-        {/* Summary if available */}
-        {explanation.summary && (
-          <div className="mt-5 rounded-xl bg-indigo-50 border border-indigo-100 p-4">
-            <p className="text-xs font-semibold text-indigo-600 uppercase tracking-wide mb-2">
-              Overall Summary
+        {/* Totals */}
+        <div className="mt-5 grid grid-cols-2 gap-4 text-sm">
+          <div className="rounded-lg bg-gray-50 border border-gray-100 p-3">
+            <p className="text-xs text-gray-400 mb-1">Total Billed</p>
+            <p className="font-semibold text-gray-900">
+              {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(parseFloat(explanation.total_billed))}
             </p>
-            <p className="text-sm text-indigo-900 leading-relaxed">{explanation.summary}</p>
           </div>
-        )}
+          <div className="rounded-lg bg-green-50 border border-green-100 p-3">
+            <p className="text-xs text-gray-400 mb-1">Total Covered</p>
+            <p className="font-semibold text-green-700">
+              {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(parseFloat(explanation.total_covered))}
+            </p>
+          </div>
+        </div>
       </div>
 
       {/* Per-line-item explanations */}

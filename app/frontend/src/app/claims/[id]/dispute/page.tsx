@@ -32,22 +32,14 @@ function DisputeCard({ dispute }: { dispute: Dispute }) {
             Dispute #{dispute.id.slice(0, 8)}
           </span>
           <StatusBadge status={dispute.status} />
-          {dispute.resolution && <StatusBadge status={dispute.resolution} />}
         </div>
-        <span className="text-xs text-gray-400">{formatDate(dispute.created_at)}</span>
+        <span className="text-xs text-gray-400">{formatDate(dispute.submitted_at)}</span>
       </div>
 
       <div>
         <p className="text-xs font-medium text-gray-500 mb-0.5">Reason</p>
         <p className="text-sm text-gray-800">{dispute.reason}</p>
       </div>
-
-      {dispute.description && (
-        <div>
-          <p className="text-xs font-medium text-gray-500 mb-0.5">Description</p>
-          <p className="text-sm text-gray-700">{dispute.description}</p>
-        </div>
-      )}
 
       {dispute.resolution_notes && (
         <div className="rounded-lg bg-gray-50 border border-gray-100 p-3">
@@ -71,7 +63,6 @@ export default function DisputePage() {
   const router = useRouter();
 
   const [reason, setReason] = useState("");
-  const [description, setDescription] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<Error | null>(null);
   const [success, setSuccess] = useState(false);
@@ -109,11 +100,9 @@ export default function DisputePage() {
     try {
       await disputesApi.submit(claimId, {
         reason: reason.trim(),
-        description: description.trim() || undefined,
       });
       setSuccess(true);
       setReason("");
-      setDescription("");
       await refetchDisputes();
     } catch (err) {
       setSubmitError(err instanceof Error ? err : new Error(String(err)));
@@ -167,26 +156,27 @@ export default function DisputePage() {
           </div>
 
           {/* Claim amounts */}
-          <div className="mt-4 grid grid-cols-3 gap-3">
-            <div className="rounded-lg bg-gray-50 px-4 py-3">
-              <p className="text-xs text-gray-400">Total Billed</p>
-              <p className="font-semibold text-gray-900">
-                {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(claim.total_billed)}
-              </p>
-            </div>
-            <div className="rounded-lg bg-green-50 px-4 py-3">
-              <p className="text-xs text-gray-400">Covered</p>
-              <p className="font-semibold text-green-700">
-                {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(claim.total_covered)}
-              </p>
-            </div>
-            <div className="rounded-lg bg-orange-50 px-4 py-3">
-              <p className="text-xs text-gray-400">Member Owes</p>
-              <p className="font-semibold text-orange-700">
-                {new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(claim.total_billed - claim.total_covered)}
-              </p>
-            </div>
-          </div>
+          {(() => {
+            const billed = parseFloat(claim.total_billed);
+            const covered = parseFloat(claim.total_covered);
+            const fmt = (n: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(n);
+            return (
+              <div className="mt-4 grid grid-cols-3 gap-3">
+                <div className="rounded-lg bg-gray-50 px-4 py-3">
+                  <p className="text-xs text-gray-400">Total Billed</p>
+                  <p className="font-semibold text-gray-900">{fmt(billed)}</p>
+                </div>
+                <div className="rounded-lg bg-green-50 px-4 py-3">
+                  <p className="text-xs text-gray-400">Covered</p>
+                  <p className="font-semibold text-green-700">{fmt(covered)}</p>
+                </div>
+                <div className="rounded-lg bg-orange-50 px-4 py-3">
+                  <p className="text-xs text-gray-400">Member Owes</p>
+                  <p className="font-semibold text-orange-700">{fmt(billed - covered)}</p>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -230,21 +220,6 @@ export default function DisputePage() {
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               required
-            />
-          </div>
-
-          <div>
-            <label className="label" htmlFor="description">
-              Additional Details{" "}
-              <span className="text-gray-400 font-normal">(optional)</span>
-            </label>
-            <textarea
-              id="description"
-              className="input resize-none"
-              rows={4}
-              placeholder="Provide any additional context, supporting information, or references to policy documents..."
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
             />
           </div>
 

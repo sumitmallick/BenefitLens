@@ -7,15 +7,40 @@ on:
     branches: [main]
 
 env:
-  PYTHON_VERSION: "3.12"
   NODE_VERSION: "20"
 
 jobs:
 
-  # ── Backend tests ───────────────────────────────────────────────────────
-  backend-test:
-    name: Backend — Lint, Type Check, Tests
+  # ── Secrets scan ─────────────────────────────────────────────────────────────
+  # Runs first — no point building an image that contains leaked credentials.
+  secrets-scan:
+    name: Secrets Scan (TruffleHog)
     runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Fetch full history so TruffleHog can diff every commit on a PR
+          fetch-depth: 0
+
+      - name: TruffleHog secrets scan
+        uses: trufflesecurity/trufflehog-actions-scan@v1
+        with:
+          # On PRs, scan only the commits added by this PR; on push scan HEAD
+          extra_args: >-
+            --only-verified
+            --results=verified,unknown
+
+  # ── Backend tests (matrix: Python 3.11 + 3.12) ───────────────────────────────
+  backend-test:
+    name: Backend — Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    needs: [secrets-scan]
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
 
     services:
       postgres:
@@ -51,7 +76,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install dependencies
@@ -82,12 +107,13 @@ jobs:
         uses: codecov/codecov-action@v4
         with:
           files: app/backend/coverage.xml
-          flags: backend
+          flags: backend-py${{ matrix.python-version }}
 
-  # ── Frontend tests ──────────────────────────────────────────────────────
+  # ── Frontend tests ────────────────────────────────────────────────────────────
   frontend-test:
     name: Frontend — Type Check, Lint, Build
     runs-on: ubuntu-latest
+    needs: [secrets-scan]
 
     defaults:
       run:
@@ -116,12 +142,65 @@ jobs:
         env:
           NEXT_PUBLIC_API_URL: http://localhost:8000
 
-  # ── Docker build ────────────────────────────────────────────────────────
+  # ── Infrastructure validation ─────────────────────────────────────────────────
+  infra-validate:
+    name: Infrastructure — Helm lint + Terraform validate
+    runs-on: ubuntu-latest
+    needs: [secrets-scan]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "3.14.0"
+
+      - name: Helm lint
+        run: |
+          helm lint infrastructure/helm/claims-system \
+            --strict \
+            --set secrets.DATABASE_URL="postgres://dummy:dummy@localhost/db" \
+            --set secrets.PHI_ENCRYPTION_KEY="dummy-key-32-chars-placeholder00" \
+            --set secrets.REDIS_URL="redis://localhost:6379/0"
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.0"
+
+      - name: Terraform init (mock backend)
+        working-directory: infrastructure/terraform
+        env:
+          # Provide dummy AWS credentials so provider initialises without errors
+          AWS_ACCESS_KEY_ID: "mock_access_key"
+          AWS_SECRET_ACCESS_KEY: "mock_secret_key"
+          AWS_DEFAULT_REGION: "us-east-1"
+        run: |
+          terraform init \
+            -backend=false \
+            -input=false
+
+      - name: Terraform validate
+        working-directory: infrastructure/terraform
+        env:
+          AWS_ACCESS_KEY_ID: "mock_access_key"
+          AWS_SECRET_ACCESS_KEY: "mock_secret_key"
+          AWS_DEFAULT_REGION: "us-east-1"
+        run: terraform validate
+
+  # ── Docker build ───────────────────────────────────────────────────────────────
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
-    needs: [backend-test, frontend-test]
+    needs: [backend-test, frontend-test, infra-validate]
     if: github.ref == 'refs/heads/main'
+    outputs:
+      # Propagate image tags so security-scan and deploy jobs can reference them
+      backend_image: ${{ steps.meta-backend.outputs.tags }}
+      frontend_image: ${{ steps.meta-frontend.outputs.tags }}
+      image_digest_backend: ${{ steps.build-backend.outputs.digest }}
+      image_digest_frontend: ${{ steps.build-frontend.outputs.digest }}
 
     steps:
       - uses: actions/checkout@v4
@@ -136,46 +215,132 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Docker metadata — backend
+        id: meta-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}/claims-backend
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Docker metadata — frontend
+        id: meta-frontend
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}/claims-frontend
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
       - name: Build and push backend image
+        id: build-backend
         uses: docker/build-push-action@v5
         with:
           context: ./app/backend
           file: ./infrastructure/docker/Dockerfile.backend
           push: true
-          tags: |
-            ghcr.io/${{ github.repository }}/claims-backend:${{ github.sha }}
-            ghcr.io/${{ github.repository }}/claims-backend:latest
+          tags: ${{ steps.meta-backend.outputs.tags }}
+          labels: ${{ steps.meta-backend.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Export image digest for Trivy to scan the exact pushed image
+          outputs: type=image,name=ghcr.io/${{ github.repository }}/claims-backend,push=true
 
       - name: Build and push frontend image
+        id: build-frontend
         uses: docker/build-push-action@v5
         with:
           context: ./app/frontend
           file: ./infrastructure/docker/Dockerfile.frontend
           push: true
-          tags: |
-            ghcr.io/${{ github.repository }}/claims-frontend:${{ github.sha }}
-            ghcr.io/${{ github.repository }}/claims-frontend:latest
+          tags: ${{ steps.meta-frontend.outputs.tags }}
+          labels: ${{ steps.meta-frontend.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ── Deploy to K8s ────────────────────────────────────────────────────────
+  # ── Security scan (Trivy) ──────────────────────────────────────────────────────
+  # Scans the freshly-built images for OS and library CVEs.
+  # The deploy job depends on this job — a CRITICAL CVE blocks production deploy.
+  security-scan:
+    name: Security Scan (Trivy)
+    runs-on: ubuntu-latest
+    needs: [docker-build]
+    permissions:
+      # Required to upload SARIF results to GitHub Security tab
+      security-events: write
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [backend, frontend]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Trivy vulnerability scanner — ${{ matrix.component }}
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}/claims-${{ matrix.component }}:${{ github.sha }}
+          format: sarif
+          output: trivy-${{ matrix.component }}.sarif
+          # Fail the build on CRITICAL severity CVEs; MEDIUM/HIGH generate warnings
+          exit-code: "1"
+          severity: CRITICAL
+          # Ignore CVEs that have no available fix yet (reduces noise)
+          ignore-unfixed: true
+          vuln-type: os,library
+
+      - name: Upload Trivy SARIF to GitHub Security tab
+        if: always()    # upload even on failure so findings are visible
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-${{ matrix.component }}.sarif
+          category: trivy-${{ matrix.component }}
+
+      - name: Run Trivy in table format (human-readable summary)
+        if: always()
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}/claims-${{ matrix.component }}:${{ github.sha }}
+          format: table
+          exit-code: "0"   # summary only; don't fail twice
+          severity: CRITICAL,HIGH,MEDIUM
+          ignore-unfixed: true
+
+  # ── Deploy to K8s ──────────────────────────────────────────────────────────────
+  # Only runs when security scan passes — CRITICAL CVEs block this job.
   deploy:
     name: Deploy — Helm upgrade
     runs-on: ubuntu-latest
-    needs: [docker-build]
+    needs: [security-scan]
     if: github.ref == 'refs/heads/main'
     environment: production
 
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "3.14.0"
+
       - name: Configure kubectl
         uses: azure/k8s-set-context@v3
         with:
           method: kubeconfig
           kubeconfig: ${{ secrets.KUBECONFIG }}
+
+      - name: Apply namespace manifest
+        run: kubectl apply -f infrastructure/kubernetes/namespace.yaml
 
       - name: Deploy via Helm
         run: |
@@ -186,7 +351,7 @@ jobs:
             --set secrets.DATABASE_URL="${{ secrets.DATABASE_URL }}" \
             --set secrets.PHI_ENCRYPTION_KEY="${{ secrets.PHI_ENCRYPTION_KEY }}" \
             --set secrets.REDIS_URL="${{ secrets.REDIS_URL }}" \
-            --wait \
+            --atomic \
             --timeout 5m
 
       - name: Run post-deploy smoke test

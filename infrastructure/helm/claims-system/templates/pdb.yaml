@@ -1,0 +1,17 @@
+{{- if .Values.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "claims-system.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "claims-system.labels" . | nindent 4 }}
+spec:
+  # Guarantee at least 2 pods remain available during voluntary disruptions
+  # (node drains, cluster upgrades). With minReplicas=3 this means at most
+  # one pod can be evicted at a time, ensuring zero downtime for rolling drains.
+  minAvailable: {{ .Values.pdb.minAvailable | default 2 }}
+  selector:
+    matchLabels:
+      {{- include "claims-system.selectorLabels" . | nindent 6 }}
+{{- end }}

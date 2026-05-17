@@ -1,26 +1,63 @@
+# ── Identity ──────────────────────────────────────────────────────────────────
+# Override the chart name used in resource names (optional).
+nameOverride: ""
+# Override the full resource name prefix (optional). Takes precedence over nameOverride.
+fullnameOverride: ""
+
+# ── Replicas ──────────────────────────────────────────────────────────────────
+# Only respected when autoscaling.enabled is false.
 replicaCount: 3
 
+# ── Image ─────────────────────────────────────────────────────────────────────
 image:
   repository: ghcr.io/YOUR_ORG/claims-backend
-  tag: latest
+  # Defaults to Chart.AppVersion if left empty.
+  tag: ""
   pullPolicy: IfNotPresent
 
+imagePullSecrets: []
+
+# ── Service Account ───────────────────────────────────────────────────────────
+serviceAccount:
+  create: true
+  # Name is auto-generated from fullname helper when left empty.
+  name: ""
+  # IRSA — set to the IAM role ARN that grants KMS decrypt + ESO access.
+  # Example: arn:aws:iam::123456789012:role/claims-eks-pod-role
+  irsaRoleArn: ""
+  annotations: {}
+  # Do not auto-mount the service account token; pods fetch it via projected volume.
+  automountToken: false
+
+# ── Service ───────────────────────────────────────────────────────────────────
 service:
   type: ClusterIP
   port: 80
   targetPort: 8000
+  annotations: {}
 
+# ── Ingress ───────────────────────────────────────────────────────────────────
 ingress:
   enabled: true
   className: nginx
-  annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
+  certIssuer: letsencrypt-prod
+  annotations: {}
   hosts:
     - host: api.claims.example.com
       paths:
         - path: /api
           pathType: Prefix
+        - path: /health
+          pathType: Exact
+  # Explicit TLS overrides the auto-generated secret name.
+  # Leave empty to use the default "<fullname>-tls" secret.
+  tls: []
+  # tls:
+  #   - secretName: claims-tls
+  #     hosts:
+  #       - api.claims.example.com
 
+# ── Resources ─────────────────────────────────────────────────────────────────
 resources:
   requests:
     cpu: 250m
@@ -29,6 +66,7 @@ resources:
     cpu: 1000m
     memory: 512Mi
 
+# ── Autoscaling (HPA) ─────────────────────────────────────────────────────────
 autoscaling:
   enabled: true
   minReplicas: 3
@@ -36,14 +74,54 @@ autoscaling:
   targetCPUUtilizationPercentage: 70
   targetMemoryUtilizationPercentage: 80
 
-env:
-  ENVIRONMENT: production
-  LOG_LEVEL: INFO
-  ENABLE_KAFKA: "true"
-  ENABLE_REDIS_CACHE: "true"
+# ── Pod Disruption Budget ─────────────────────────────────────────────────────
+pdb:
+  enabled: true
+  # Keep at least 2 pods during node drains / voluntary disruptions.
+  minAvailable: 2
 
+# ── Network Policy ────────────────────────────────────────────────────────────
+networkPolicy:
+  enabled: true
+  # Namespace label value for the ingress controller (deny all ingress by default).
+  ingressControllerNamespace: ingress-nginx
+  postgresPort: 5432
+  redisPort: 6379
+  kafkaPort: 9092
+
+# ── Pod Metadata ──────────────────────────────────────────────────────────────
+podAnnotations:
+  # Prometheus auto-discovery — scrape /metrics on port 8000
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8000"
+  prometheus.io/path: "/metrics"
+
+podLabels: {}
+
+# ── Scheduling ────────────────────────────────────────────────────────────────
+nodeSelector: {}
+
+tolerations: []
+
+# Additional affinity rules merged with the built-in pod anti-affinity.
+affinity: {}
+
+# ── ConfigMap (non-secret env vars) ───────────────────────────────────────────
+configmap:
+  environment: production
+  logLevel: INFO
+  enableKafka: "true"
+  # Populated by Terraform output / External Secrets in production.
+  kafkaBootstrapServers: ""
+  enableRedisCache: "true"
+  # Arbitrary extra key-value pairs injected into the ConfigMap as-is.
+  extra: {}
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+# WARNING: Do NOT commit real credentials here. In production these are supplied
+# via External Secrets Operator (ESO) reading from AWS Secrets Manager, or passed
+# at helm upgrade time with --set secrets.<key>=... from a CI secret store.
 secrets:
-  # Populated from external-secrets or Vault in production
   DATABASE_URL: ""
   PHI_ENCRYPTION_KEY: ""
   REDIS_URL: ""
