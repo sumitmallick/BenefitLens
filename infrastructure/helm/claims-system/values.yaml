@@ -1,0 +1,49 @@
+replicaCount: 3
+
+image:
+  repository: ghcr.io/YOUR_ORG/claims-backend
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8000
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: api.claims.example.com
+      paths:
+        - path: /api
+          pathType: Prefix
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+env:
+  ENVIRONMENT: production
+  LOG_LEVEL: INFO
+  ENABLE_KAFKA: "true"
+  ENABLE_REDIS_CACHE: "true"
+
+secrets:
+  # Populated from external-secrets or Vault in production
+  DATABASE_URL: ""
+  PHI_ENCRYPTION_KEY: ""
+  REDIS_URL: ""

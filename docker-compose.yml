@@ -1,0 +1,118 @@
+version: "3.9"
+
+# Local development environment.
+# Starts: PostgreSQL, Redis, the backend API, and the Next.js frontend.
+# Kafka is commented out — set ENABLE_KAFKA=true and uncomment to enable.
+
+services:
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: claims-postgres
+    environment:
+      POSTGRES_USER: claims
+      POSTGRES_PASSWORD: claims
+      POSTGRES_DB: claimsdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infrastructure/docker/postgres-init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U claims -d claimsdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Redis ──────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: claims-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Backend (FastAPI) ──────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./app/backend
+      dockerfile: ../../infrastructure/docker/Dockerfile.backend
+    container_name: claims-backend
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://claims:claims@postgres:5432/claimsdb
+      DATABASE_URL_SYNC: postgresql://claims:claims@postgres:5432/claimsdb
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: development
+      LOG_LEVEL: INFO
+      CORS_ORIGINS: '["http://localhost:3000"]'
+      PHI_ENCRYPTION_KEY: ""  # WARNING: empty key = plaintext storage (dev only)
+      ENABLE_KAFKA: "false"
+      ENABLE_REDIS_CACHE: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./app/backend:/app  # hot reload in dev
+    command: >
+      sh -c "
+        cd /app &&
+        alembic upgrade head &&
+        uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+      "
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Frontend (Next.js) ─────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./app/frontend
+      dockerfile: ../../infrastructure/docker/Dockerfile.frontend
+    container_name: claims-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    volumes:
+      - ./app/frontend:/app
+      - /app/node_modules
+      - /app/.next
+
+  # ── Kafka (optional — event streaming) ────────────────────────────────
+  # Uncomment to enable Kafka-based domain event publishing.
+  # Also set ENABLE_KAFKA=true in the backend service.
+  #
+  # zookeeper:
+  #   image: confluentinc/cp-zookeeper:7.6.0
+  #   environment:
+  #     ZOOKEEPER_CLIENT_PORT: 2181
+  #
+  # kafka:
+  #   image: confluentinc/cp-kafka:7.6.0
+  #   depends_on: [zookeeper]
+  #   ports:
+  #     - "9092:9092"
+  #   environment:
+  #     KAFKA_BROKER_ID: 1
+  #     KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+  #     KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+  #     KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+  #     KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+volumes:
+  postgres_data:

@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.coverage
+coverage.xml
+htmlcov/
+
+# Node.js
+node_modules/
+.next/
+out/
+dist/
+.turbo/
+
+# Environment
+.env
+.env.local
+.env.*.local
+*.env
+
+# Docker
+.dockerignore
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform.lock.hcl
+
+# Logs
+*.log
+logs/
+
+# Secrets — these must NEVER be committed
+*.pem
+*.key
+secrets/
