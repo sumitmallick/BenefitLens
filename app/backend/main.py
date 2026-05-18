@@ -6,22 +6,29 @@ Startup:
   2. Initialize PHI encryptor
   3. Register routes
   4. Configure structured logging (JSON in production)
+  5. Wire Prometheus metrics + rate limiter
 
 The app is PHI-aware from startup — if encryption is not configured in
 a non-dev environment, startup fails rather than silently storing plaintext.
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 
+import redis.asyncio as aioredis
 import uvicorn
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from sqlalchemy import text
 
 from claims.api.deps import get_current_user, require_roles
 from claims.api.middleware import RequestIDMiddleware
+from claims.api.rate_limit import limiter
 from claims.api.routes.auth import router as auth_router
 from claims.api.routes.claims import router as claims_router
 from claims.api.routes.disputes import router as disputes_router
@@ -35,9 +42,6 @@ from config import get_settings
 settings = get_settings()
 
 # ── Structured logging ────────────────────────────────────────────────────
-# JSON in production (consumed by Promtail → Loki → Grafana).
-# ConsoleRenderer with colours in development.
-# PHI fields (phi_* prefix) are stripped by the logging pipeline before render.
 configure_logging(environment=settings.environment, log_level=settings.log_level)
 logger = get_logger(__name__)
 
@@ -55,6 +59,12 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+# Attach limiter to app state (slowapi reads it from here)
+# Rate limiter — Redis-backed, per-IP. Routes opt-in with @limiter.limit("N/minute").
+# auth/login: 10/min  auth/register: 5/min  (see claims/api/routes/auth.py)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -66,8 +76,7 @@ app.add_middleware(RequestIDMiddleware)
 
 # ── Prometheus metrics ────────────────────────────────────────────────────
 # Exposes /metrics endpoint scraped by Prometheus every 10 s.
-# Provides: http_requests_total, http_request_duration_seconds (histogram)
-# Grafana dashboard reads these via the Prometheus data source.
+# Grafana reads: http_requests_total, http_request_duration_seconds
 Instrumentator(
     should_group_status_codes=False,
     should_ignore_untemplated=True,
@@ -101,14 +110,55 @@ async def on_startup() -> None:
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
+    # Allow in-flight requests a brief window to complete before the process exits.
+    # Kubernetes sends SIGTERM and waits terminationGracePeriodSeconds (default 30s);
+    # this sleep buys time for load-balancer health checks to stop routing new traffic.
+    logger.info("claims_service_shutdown_initiated")
+    await asyncio.sleep(2)
     logger.info("claims_service_shutdown")
 
 
-# ── Health check ──────────────────────────────────────────────────────────
+# ── Health check (DB + Redis liveness) ───────────────────────────────────
 
 @app.get("/health", tags=["Health"])
-async def health() -> dict:
-    return {"status": "ok", "service": "claims-processing"}
+async def health(session=Depends(get_session)) -> JSONResponse:
+    """
+    Liveness + readiness probe.
+
+    Checks:
+      - db:    SELECT 1 against PostgreSQL
+      - cache: PING to Redis
+
+    Returns HTTP 200 if all checks pass, HTTP 503 if DB is down.
+    Redis failure returns 200 with cache=degraded — Redis is not a hard dependency.
+    """
+    checks: dict[str, str] = {}
+
+    # Database
+    try:
+        await session.execute(text("SELECT 1"))
+        checks["db"] = "ok"
+    except Exception as exc:
+        logger.error("health_check_db_failed", error=str(exc))
+        checks["db"] = "error"
+
+    # Redis (non-critical — system degrades gracefully without cache)
+    try:
+        r = aioredis.from_url(settings.redis_url, socket_connect_timeout=1)
+        await r.ping()
+        await r.aclose()
+        checks["cache"] = "ok"
+    except Exception:
+        checks["cache"] = "degraded"
+
+    db_ok = checks["db"] == "ok"
+    overall = "ok" if db_ok and checks["cache"] == "ok" else ("degraded" if db_ok else "error")
+    status_code = 200 if db_ok else 503
+
+    return JSONResponse(
+        status_code=status_code,
+        content={"status": overall, "service": "claims-processing", **checks},
+    )
 
 
 @app.get("/", tags=["Health"])
@@ -128,14 +178,17 @@ async def get_platform_stats(
     Returns counts by entity type and claims breakdown by status.
     No PHI is returned — all values are aggregate counts/rates.
     """
-    from sqlalchemy import func as sqlfunc, select, case
+    from datetime import date
+
+    from sqlalchemy import case
+    from sqlalchemy import func as sqlfunc
+    from sqlalchemy import select
+
     from claims.infrastructure.models import ClaimORM, MemberORM, PolicyORM
-    from datetime import date, timedelta
 
     today = date.today()
     month_start = today.replace(day=1)
 
-    # Claims stats with status breakdown
     claims_result = await session.execute(
         select(
             sqlfunc.count(ClaimORM.id).label("total"),
@@ -158,7 +211,6 @@ async def get_platform_stats(
     adjudicated = approved + partially + denied
     approval_rate = round((approved + partially) / adjudicated * 100, 1) if adjudicated > 0 else 0.0
 
-    # Member and policy counts
     member_count = await session.scalar(select(sqlfunc.count(MemberORM.id))) or 0
     policy_count = await session.scalar(select(sqlfunc.count(PolicyORM.id))) or 0
     active_policy_count = await session.scalar(
@@ -189,7 +241,6 @@ async def get_platform_stats(
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    # Log without PHI — only the URL path and exception type
     logger.error(
         "unhandled_exception",
         path=request.url.path,
@@ -208,4 +259,5 @@ if __name__ == "__main__":
         port=8000,
         reload=settings.environment == "development",
         log_level=settings.log_level.lower(),
+        timeout_graceful_shutdown=30,
     )

@@ -36,6 +36,9 @@ faker==33.1.0
 ruff==0.8.4
 mypy==1.13.0
 
+# Rate limiting (Redis-backed distributed throttling)
+slowapi==0.1.9
+
 # Observability
 structlog==24.4.0
 prometheus-fastapi-instrumentator==7.0.0

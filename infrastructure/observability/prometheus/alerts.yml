@@ -1,0 +1,108 @@
+groups:
+  - name: claimsiq_slo
+    interval: 1m
+    rules:
+
+      # ── Availability ───────────────────────────────────────────────────
+      - alert: BackendDown
+        expr: up{job="claimsiq_backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "ClaimsIQ backend is unreachable"
+          description: "Prometheus cannot scrape the backend at {{ $labels.instance }}. Service may be down or /metrics is broken."
+          runbook: "https://github.com/sumitmallick/BenefitLens/blob/main/docs/runbooks/backend-down.md"
+
+      # ── Error rate ─────────────────────────────────────────────────────
+      - alert: HighErrorRate
+        expr: >
+          sum(rate(http_requests_total{job="claimsiq_backend", status=~"5.."}[5m]))
+          /
+          sum(rate(http_requests_total{job="claimsiq_backend"}[5m]))
+          > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "5xx error rate > 5%"
+          description: "{{ $value | humanizePercentage }} of requests are returning 5xx errors over the last 5 minutes."
+
+      - alert: ElevatedErrorRate
+        expr: >
+          sum(rate(http_requests_total{job="claimsiq_backend", status=~"5.."}[5m]))
+          /
+          sum(rate(http_requests_total{job="claimsiq_backend"}[5m]))
+          > 0.01
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "5xx error rate > 1%"
+          description: "{{ $value | humanizePercentage }} of requests are returning 5xx errors — may indicate partial degradation."
+
+      # ── Latency ────────────────────────────────────────────────────────
+      - alert: HighP95Latency
+        expr: >
+          histogram_quantile(0.95,
+            sum(rate(http_request_duration_seconds_bucket{job="claimsiq_backend"}[5m])) by (le)
+          ) > 1.0
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "P95 latency > 1s"
+          description: "95th percentile request latency is {{ $value | humanizeDuration }}. Adjudication or DB queries may be slow."
+
+      - alert: CriticalP99Latency
+        expr: >
+          histogram_quantile(0.99,
+            sum(rate(http_request_duration_seconds_bucket{job="claimsiq_backend"}[5m])) by (le)
+          ) > 3.0
+        for: 3m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "P99 latency > 3s"
+          description: "99th percentile request latency is {{ $value | humanizeDuration }}. Investigate slow claim adjudications or DB lock contention."
+
+      # ── Traffic ────────────────────────────────────────────────────────
+      - alert: NoTraffic
+        expr: sum(rate(http_requests_total{job="claimsiq_backend"}[5m])) == 0
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Zero HTTP traffic for 5 minutes"
+          description: "No requests are reaching the backend. Load balancer or upstream routing may be broken."
+
+      # ── Claims-specific ────────────────────────────────────────────────
+      - alert: ClaimSubmissionErrors
+        expr: >
+          sum(rate(http_requests_total{job="claimsiq_backend", handler="/api/v1/claims/", method="POST", status=~"5.."}[5m])) > 0
+        for: 2m
+        labels:
+          severity: critical
+          team: claims
+        annotations:
+          summary: "Claim submission endpoint is returning 5xx errors"
+          description: "Adjudication pipeline may be broken. Claims are not being processed."
+
+      # ── Auth ───────────────────────────────────────────────────────────
+      - alert: HighLoginFailureRate
+        expr: >
+          sum(rate(http_requests_total{job="claimsiq_backend", handler="/api/v1/auth/login", status="401"}[5m]))
+          > 10
+        for: 2m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "High rate of failed login attempts"
+          description: "{{ $value }} failed logins per second — possible brute-force attack on the auth endpoint."

@@ -200,6 +200,17 @@ def adjudicate(line_item: LineItem, ctx: AdjudicationContext) -> tuple[LineItem,
     # Coverage percentage
     covered = payable * rule.coverage_factor
 
+    # ── Step 9.5: Out-of-pocket maximum ────────────────────────────────
+    # member_cost_sharing = deductible + copay + coinsurance (member's share)
+    # coinsurance = payable_after_copay - covered  (i.e. payable * (1 - coverage_factor))
+    coinsurance = payable - covered  # payable here is already after deductible and copay
+    member_cost_sharing = deductible_applied + copay_applied + coinsurance
+    _, oop_subsidy = policy.apply_oop_max(member_cost_sharing)
+
+    if not oop_subsidy.is_zero:
+        # OOP max hit — insurer covers the excess coinsurance
+        covered = covered + oop_subsidy
+
     # Consume annual usage
     if annual_usage is not None and not covered.is_zero:
         annual_usage.consume(covered)
@@ -226,6 +237,11 @@ def adjudicate(line_item: LineItem, ctx: AdjudicationContext) -> tuple[LineItem,
     explanation_parts.append(
         f"Coverage at {rule.coverage_percentage}%: {covered}."
     )
+    if not oop_subsidy.is_zero:
+        explanation_parts.append(
+            f"Out-of-pocket maximum of {policy.out_of_pocket_max} reached; "
+            f"plan covered additional {oop_subsidy}."
+        )
 
     # Determine line item status
     if covered.is_zero:

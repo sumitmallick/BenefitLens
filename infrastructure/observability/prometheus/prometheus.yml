@@ -5,8 +5,9 @@ global:
     env: local
     app: claimsiq
 
-# ── Alerting rules (none yet — add as separate .rules files) ──────────────
-rule_files: []
+# ── Alerting rules ─────────────────────────────────────────────────────────
+rule_files:
+  - /etc/prometheus/alerts.yml
 
 # ── Scrape configs ────────────────────────────────────────────────────────
 scrape_configs:

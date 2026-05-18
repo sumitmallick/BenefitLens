@@ -85,6 +85,7 @@ def _map_policy(orm: PolicyORM) -> Policy:
         deductible_amount=Money(orm.deductible_amount),
         deductible_met=Money(orm.deductible_met),
         out_of_pocket_max=_money(orm.out_of_pocket_max),
+        oop_used=Money(orm.oop_used) if orm.oop_used is not None else Money.zero(),
         coverage_rules=[_map_coverage_rule(r) for r in orm.coverage_rules],
     )
 
@@ -234,6 +235,7 @@ class PolicyRepository:
         existing = await self._session.get(PolicyORM, policy.id)
         if existing:
             existing.deductible_met = policy.deductible_met.amount
+            existing.oop_used = policy.oop_used.amount
             existing.status = policy.status.value
         else:
             orm = PolicyORM(
@@ -246,6 +248,7 @@ class PolicyRepository:
                 deductible_amount=policy.deductible_amount.amount,
                 deductible_met=policy.deductible_met.amount,
                 out_of_pocket_max=policy.out_of_pocket_max.amount if policy.out_of_pocket_max else None,
+                oop_used=policy.oop_used.amount,
             )
             self._session.add(orm)
             for rule in policy.coverage_rules:

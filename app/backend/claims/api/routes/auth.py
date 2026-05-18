@@ -13,7 +13,7 @@ import logging
 import uuid
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, field_validator
 from sqlalchemy import select
@@ -26,6 +26,7 @@ from claims.api.deps import (
     require_roles,
     verify_password,
 )
+from claims.api.rate_limit import limiter
 from claims.infrastructure.database import get_session
 from claims.infrastructure.models import UserORM
 
@@ -124,7 +125,9 @@ def _user_response(user: UserORM) -> UserResponse:
     status_code=status.HTTP_201_CREATED,
     summary="Register a new user account",
 )
+@limiter.limit("5/minute")
 async def register(
+    request: Request,
     payload: RegisterRequest,
     session: AsyncSession = Depends(get_session),
 ) -> TokenResponse:
@@ -161,7 +164,9 @@ async def register(
     response_model=TokenResponse,
     summary="Authenticate and obtain a JWT access token",
 )
+@limiter.limit("10/minute")
 async def login(
+    request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     session: AsyncSession = Depends(get_session),
 ) -> TokenResponse:

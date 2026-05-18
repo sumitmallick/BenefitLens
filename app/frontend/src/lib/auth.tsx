@@ -87,18 +87,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.setItem(TOKEN_KEY, data.access_token);
     setToken(data.access_token);
     setUser(data.user);
+    // Set a session cookie so Next.js middleware can protect routes server-side.
+    // The cookie only signals "a session exists" — JWT validation happens on each API call.
+    document.cookie = "claimsiq_session=1; path=/; SameSite=Lax; max-age=86400";
   };
 
   const logout = () => {
     localStorage.removeItem(TOKEN_KEY);
     setToken(null);
     setUser(null);
+    // Clear the middleware session cookie
+    document.cookie = "claimsiq_session=; path=/; SameSite=Lax; max-age=0";
   };
 
   const setSession = (user: AuthUser, token: string) => {
     localStorage.setItem(TOKEN_KEY, token);
     setToken(token);
     setUser(user);
+    document.cookie = "claimsiq_session=1; path=/; SameSite=Lax; max-age=86400";
   };
 
   return (

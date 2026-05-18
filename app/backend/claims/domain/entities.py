@@ -90,6 +90,9 @@ class Policy:
     deductible_met: Money
     out_of_pocket_max: Optional[Money]
     coverage_rules: List[CoverageRule] = field(default_factory=list)
+    # Tracks accumulated out-of-pocket costs (deductible + copay + coinsurance)
+    # for this benefit year. Mutated by the adjudicator alongside deductible_met.
+    oop_used: Money = field(default_factory=Money.zero)
 
     def is_active_on(self, service_date: date) -> bool:
         return (
@@ -118,6 +121,39 @@ class Policy:
         self.deductible_met = self.deductible_met + applied
         remainder = amount - applied
         return applied, remainder
+
+    @property
+    def oop_remaining(self) -> Optional[Money]:
+        """None means no OOP max applies (unlimited)."""
+        if self.out_of_pocket_max is None:
+            return None
+        return self.out_of_pocket_max - self.oop_used
+
+    def apply_oop_max(self, member_cost_sharing: Money) -> tuple[Money, Money]:
+        """
+        Given member cost-sharing (deductible + copay + coinsurance) for a line item,
+        return (actual_member_cost, insurer_subsidy).
+
+        If applying member_cost_sharing would exceed the OOP max, the insurer
+        picks up the difference (subsidy > 0). Mutates oop_used.
+
+        Returns:
+          actual_member_cost  — what the member actually pays after OOP cap
+          insurer_subsidy     — additional covered amount from OOP protection
+        """
+        if self.out_of_pocket_max is None:
+            self.oop_used = self.oop_used + member_cost_sharing
+            return member_cost_sharing, Money.zero()
+
+        remaining = self.oop_remaining
+        if member_cost_sharing <= remaining:
+            self.oop_used = self.oop_used + member_cost_sharing
+            return member_cost_sharing, Money.zero()
+
+        # OOP max kicked in — insurer covers the excess
+        insurer_subsidy = member_cost_sharing - remaining
+        self.oop_used = self.out_of_pocket_max  # now fully met
+        return remaining, insurer_subsidy
 
 
 # ---------------------------------------------------------------------------

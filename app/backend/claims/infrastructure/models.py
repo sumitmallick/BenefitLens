@@ -63,6 +63,9 @@ class PolicyORM(Base):
     deductible_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     deductible_met: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=Decimal("0.00"))
     out_of_pocket_max: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    # Accumulated member cost-sharing (deductible + copay + coinsurance) this benefit year.
+    # When oop_used reaches out_of_pocket_max, the insurer covers 100% of subsequent covered services.
+    oop_used: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False, default=Decimal("0.00"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -229,3 +232,41 @@ class UserORM(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class AuditLogORM(Base):
+    """
+    HIPAA-compliant audit trail: who accessed which PHI resource, when, and from where.
+
+    Every read of a claim detail, member record, or dispute that could expose PHI
+    must insert a row here. The application service layer handles insertion via
+    AuditLogRepository so routes stay clean.
+
+    Retention: retain audit logs for minimum 6 years (HIPAA §164.530(j)).
+    """
+    __tablename__ = "audit_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+    # Who performed the action
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    user_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    user_role: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    # What action was performed
+    action: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # e.g. VIEW_CLAIM_DETAIL, SUBMIT_CLAIM, PAY_CLAIM, VIEW_MEMBER,
+    #      SUBMIT_DISPUTE, RESOLVE_DISPUTE, EXPORT_CLAIMS
+
+    # Which resource was accessed
+    resource_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    # e.g. claim, member, policy, dispute
+    resource_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+
+    # Request context (for forensics)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)   # IPv6 max = 45 chars
+    request_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)   # X-Request-ID correlation
+    http_method: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    http_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)

@@ -41,6 +41,7 @@ from claims.infrastructure.models import (               # noqa: F401
     DisputeORM,
     DomainEventORM,
     UserORM,
+    AuditLogORM,
 )
 
 config = context.config
