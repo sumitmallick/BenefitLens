@@ -43,7 +43,7 @@ let keyCounter = 1;
 // ─── Filing guide ─────────────────────────────────────────────────────────────
 
 function FilingGuide() {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);
 
   return (
     <div className="rounded-xl border border-blue-200 bg-blue-50 overflow-hidden">
@@ -62,7 +62,7 @@ function FilingGuide() {
           <div>
             <p className="text-sm font-semibold text-blue-900">How to fill this form</p>
             <p className="text-xs text-blue-600 mt-0.5">
-              Codes, formats, and what to expect after submitting — click to {open ? "hide" : "show"}
+              Codes, formats, and what to expect after submitting — click to {open ? "collapse" : "expand"}
             </p>
           </div>
         </div>
