@@ -4,8 +4,11 @@ Redis cache-aside for ClaimsIQ hot paths.
 Cache strategy:
   - Policy + coverage rules: TTL 5 min (policies change infrequently; adjudication
     reads them on every claim submission — the hottest read path in the system).
-  - Cache key: policy:member:{member_id}:active
-  - On policy save/update: invalidate the member's cache key.
+  - Cache key: claimsiq:policy:{policy_id}  — keyed by policy UUID, not by member.
+    Rationale: after the membership_policies refactor a single member may be enrolled
+    in multiple policies, and a single policy may cover multiple members.  Keying by
+    policy_id is the natural, stable identifier that adjudication already uses.
+  - On policy save/update: invalidate by policy_id.
 
 Serialization: pure JSON with custom handlers for UUID, date, Decimal, Money.
 Avoids pickle for security (cache-poisoning resistance).
@@ -15,10 +18,10 @@ Policy objects contain only financial/structural data (amounts, dates, rules).
 
 Usage:
     cache = PolicyCache(redis_client)
-    policy = await cache.get_active_for_member(member_id)
+    policy = await cache.get(policy_id)
     if policy is None:
-        policy = await repo.get_active_for_member(member_id)
-        await cache.set_active_for_member(member_id, policy)
+        policy = await repo.get(policy_id)
+        await cache.set(policy_id, policy)
 """
 from __future__ import annotations
 
@@ -43,7 +46,7 @@ _POLICY_TTL = 300  # 5 minutes
 def _policy_to_json(policy: Policy) -> str:
     data = {
         "id": str(policy.id),
-        "member_id": str(policy.member_id),
+        "holder_member_id": str(policy.holder_member_id),
         "policy_number": policy.policy_number,
         "effective_date": policy.effective_date.isoformat(),
         "expiration_date": policy.expiration_date.isoformat(),
@@ -90,7 +93,7 @@ def _policy_from_json(raw: str) -> Policy:
     ]
     return Policy(
         id=uuid.UUID(d["id"]),
-        member_id=uuid.UUID(d["member_id"]),
+        holder_member_id=uuid.UUID(d["holder_member_id"]),
         policy_number=d["policy_number"],
         effective_date=date.fromisoformat(d["effective_date"]),
         expiration_date=date.fromisoformat(d["expiration_date"]),
@@ -109,6 +112,11 @@ class PolicyCache:
     """
     Cache-aside wrapper for PolicyRepository.
 
+    Keyed by policy_id (not member_id) because a single member may now be
+    enrolled in multiple policies, and a single policy may cover multiple
+    members.  The adjudicator already knows the policy_id before it fetches
+    the policy, making this the natural cache key.
+
     Injected into the application service alongside the PolicyRepository.
     The repository remains unmodified; the service checks the cache first.
     """
@@ -116,38 +124,38 @@ class PolicyCache:
     def __init__(self, redis_client) -> None:
         self._redis = redis_client
 
-    def _key(self, member_id: uuid.UUID) -> str:
-        return f"claimsiq:policy:member:{member_id}:active"
+    def _key(self, policy_id: uuid.UUID) -> str:
+        return f"claimsiq:policy:{policy_id}"
 
-    async def get_active_for_member(self, member_id: uuid.UUID) -> Optional[Policy]:
-        """Return cached active policy for member, or None on miss."""
+    async def get(self, policy_id: uuid.UUID) -> Optional[Policy]:
+        """Return a cached policy by ID, or None on miss."""
         try:
-            raw = await self._redis.get(self._key(member_id))
+            raw = await self._redis.get(self._key(policy_id))
             if raw:
                 policy = _policy_from_json(raw)
-                logger.debug("policy_cache_hit", member_id=str(member_id))
+                logger.debug("policy_cache_hit", policy_id=str(policy_id))
                 return policy
         except Exception as exc:
-            # Never let a cache failure block a claim submission
+            # Never let a cache failure block claim adjudication
             logger.warning("policy_cache_read_error", error=str(exc))
-        logger.debug("policy_cache_miss", member_id=str(member_id))
+        logger.debug("policy_cache_miss", policy_id=str(policy_id))
         return None
 
-    async def set_active_for_member(self, member_id: uuid.UUID, policy: Policy) -> None:
-        """Cache the active policy; silently skip on Redis errors."""
+    async def set(self, policy_id: uuid.UUID, policy: Policy) -> None:
+        """Cache a policy by ID; silently skip on Redis errors."""
         try:
             await self._redis.setex(
-                self._key(member_id),
+                self._key(policy_id),
                 _POLICY_TTL,
                 _policy_to_json(policy),
             )
         except Exception as exc:
             logger.warning("policy_cache_write_error", error=str(exc))
 
-    async def invalidate(self, member_id: uuid.UUID) -> None:
-        """Invalidate the cached policy for a member (call on policy update)."""
+    async def invalidate(self, policy_id: uuid.UUID) -> None:
+        """Invalidate a cached policy (call on policy update/cancellation)."""
         try:
-            await self._redis.delete(self._key(member_id))
-            logger.debug("policy_cache_invalidated", member_id=str(member_id))
+            await self._redis.delete(self._key(policy_id))
+            logger.debug("policy_cache_invalidated", policy_id=str(policy_id))
         except Exception as exc:
             logger.warning("policy_cache_invalidate_error", error=str(exc))

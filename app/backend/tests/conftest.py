@@ -146,10 +146,10 @@ async def create_test_member(client: AsyncClient) -> dict:
     return resp.json()
 
 
-async def create_test_policy(client: AsyncClient, member_id: str) -> dict:
+async def create_test_policy(client: AsyncClient, holder_member_id: str) -> dict:
     today = date.today()
     resp = await client.post("/api/v1/policies", json={
-        "member_id": member_id,
+        "holder_member_id": holder_member_id,
         "policy_number": f"POL-{uuid.uuid4().hex[:8].upper()}",
         "effective_date": str(date(today.year, 1, 1)),
         "expiration_date": str(date(today.year, 12, 31)),

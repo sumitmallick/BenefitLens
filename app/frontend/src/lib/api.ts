@@ -33,7 +33,8 @@ export interface CoverageRule {
 
 export interface Policy {
   id: string;
-  member_id: string;
+  /** Primary subscriber — the member who holds the contract */
+  holder_member_id: string;
   policy_number: string;
   effective_date: string;
   expiration_date: string;
@@ -44,14 +45,40 @@ export interface Policy {
   coverage_rules: CoverageRule[];
 }
 
-export interface CreatePolicyPayload {
+export interface MembershipPolicy {
+  id: string;
+  policy_id: string;
   member_id: string;
+  /** SELF | SPOUSE | CHILD | OTHER_DEPENDENT */
+  relationship: string;
+  enrollment_date: string;
+  termination_date?: string | null;
+  /** ACTIVE | TERMINATED | SUSPENDED */
+  status: string;
+}
+
+export interface CreatePolicyPayload {
+  /** Primary subscriber — the member who holds the contract */
+  holder_member_id: string;
   policy_number: string;
   effective_date: string;
   expiration_date: string;
   deductible_amount: number;
   out_of_pocket_max: number;
   coverage_rules: CoverageRule[];
+}
+
+export interface AddMemberToPolicyPayload {
+  member_id: string;
+  /** SPOUSE | CHILD | OTHER_DEPENDENT */
+  relationship: string;
+  enrollment_date: string;
+  /**
+   * Per-member coverage rule overrides.
+   * Omit to inherit all rules from the policy.
+   * Supply only the service types you want to override for this member.
+   */
+  coverage_rules?: CoverageRule[];
 }
 
 export interface ClaimLineItemInput {
@@ -323,6 +350,28 @@ export const policiesApi = {
 
   getById: (id: string): Promise<Policy> =>
     request<Policy>(`/api/v1/policies/${id}`),
+
+  /** List all enrolled members (with their per-member coverage rules) for a policy. */
+  listMembers: (policyId: string): Promise<MembershipPolicy[]> =>
+    request<MembershipPolicy[]>(`/api/v1/policies/${policyId}/members`),
+
+  /**
+   * Enroll a dependent under an existing policy.
+   * Optionally supply coverage_rules to override policy defaults for this member only.
+   */
+  addMember: (policyId: string, payload: AddMemberToPolicyPayload): Promise<MembershipPolicy> =>
+    request<MembershipPolicy>(`/api/v1/policies/${policyId}/members`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  /** Terminate a member's enrollment. termination_date defaults to today on the server. */
+  removeMember: (policyId: string, memberId: string, terminationDate?: string): Promise<MembershipPolicy> => {
+    const qs = terminationDate ? `?termination_date=${terminationDate}` : "";
+    return request<MembershipPolicy>(`/api/v1/policies/${policyId}/members/${memberId}${qs}`, {
+      method: "DELETE",
+    });
+  },
 };
 
 // ─── Stats ────────────────────────────────────────────────────────────────────

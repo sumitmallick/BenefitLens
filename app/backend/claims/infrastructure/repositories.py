@@ -50,6 +50,7 @@ from .models import (
     DomainEventORM,
     LineItemORM,
     MemberORM,
+    MembershipCoverageRuleORM,
     MembershipPolicyORM,
     PolicyORM,
 )
@@ -92,7 +93,28 @@ def _map_policy(orm: PolicyORM) -> Policy:
     )
 
 
+def _map_member_coverage_rule(orm: MembershipCoverageRuleORM) -> CoverageRule:
+    """Map a membership-level coverage rule to the shared CoverageRule domain entity.
+
+    The adjudicator treats these identically to policy-level CoverageRules — the only
+    difference is their source (membership table vs policy table).
+    """
+    return CoverageRule(
+        id=orm.id,
+        policy_id=orm.membership.policy_id,  # use the policy FK for adjudicator compatibility
+        service_type=ServiceType(orm.service_type),
+        coverage_percentage=orm.coverage_percentage,
+        annual_limit=_money(orm.annual_limit),
+        per_visit_limit=_money(orm.per_visit_limit),
+        copay=_money(orm.copay),
+        requires_preauth=orm.requires_preauth,
+        network_restriction=NetworkType(orm.network_restriction),
+        excluded_diagnosis_codes=orm.excluded_diagnosis_codes or [],
+    )
+
+
 def _map_membership(orm: MembershipPolicyORM) -> MembershipPolicy:
+    member_rules = [_map_member_coverage_rule(r) for r in (orm.coverage_rules or [])]
     return MembershipPolicy(
         id=orm.id,
         policy_id=orm.policy_id,
@@ -103,6 +125,7 @@ def _map_membership(orm: MembershipPolicyORM) -> MembershipPolicy:
         status=orm.status,
         created_at=orm.created_at,
         updated_at=orm.updated_at,
+        coverage_rules=member_rules,
     )
 
 
@@ -384,6 +407,21 @@ class MembershipPolicyRepository:
                 status=membership.status,
             )
             self._session.add(orm)
+            # Persist any member-level coverage rule overrides provided at enrollment
+            for rule in membership.coverage_rules:
+                rule_orm = MembershipCoverageRuleORM(
+                    id=rule.id,
+                    membership_id=membership.id,
+                    service_type=rule.service_type.value,
+                    coverage_percentage=rule.coverage_percentage,
+                    annual_limit=rule.annual_limit.amount if rule.annual_limit else None,
+                    per_visit_limit=rule.per_visit_limit.amount if rule.per_visit_limit else None,
+                    copay=rule.copay.amount if rule.copay else None,
+                    requires_preauth=rule.requires_preauth,
+                    network_restriction=rule.network_restriction.value,
+                    excluded_diagnosis_codes=rule.excluded_diagnosis_codes,
+                )
+                self._session.add(rule_orm)
 
 
 class AnnualUsageRepository:

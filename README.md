@@ -176,6 +176,19 @@ erDiagram
         timestamp updated_at
     }
 
+    MEMBERSHIP_COVERAGE_RULES {
+        uuid id PK
+        uuid membership_id FK
+        text service_type
+        numeric coverage_percentage "NUMERIC(5,2)"
+        numeric annual_limit "nullable"
+        numeric per_visit_limit "nullable"
+        numeric copay "nullable"
+        boolean requires_preauth
+        text network_restriction
+        jsonb excluded_diagnosis_codes
+    }
+
     COVERAGE_RULES {
         uuid id PK
         uuid policy_id FK
@@ -271,7 +284,8 @@ erDiagram
     MEMBERS ||--o{ CLAIMS : "files"
     USERS }o--o| MEMBERS : "linked to"
     POLICIES ||--o{ MEMBERSHIP_POLICIES : "covers"
-    POLICIES ||--o{ COVERAGE_RULES : "defines"
+    MEMBERSHIP_POLICIES ||--o{ MEMBERSHIP_COVERAGE_RULES : "overrides"
+    POLICIES ||--o{ COVERAGE_RULES : "defines (defaults)"
     POLICIES ||--o{ ANNUAL_USAGES : "tracks"
     POLICIES ||--o{ CLAIMS : "governs"
     CLAIMS ||--o{ LINE_ITEMS : "contains"
@@ -284,12 +298,13 @@ erDiagram
 
 Prior to migration 0005, `policies.member_id` pointed directly to one member, encoding a one-to-one policy/member relationship that couldn't model group or family plans.
 
-The current design separates two concerns:
+The current design separates three concerns:
 
 | Concept | Column / Table | Meaning |
 |---------|---------------|---------|
 | **Primary subscriber** | `policies.holder_member_id` | The person who holds the contract and is responsible for premiums. One policy has exactly one holder. |
 | **Enrolled members** | `membership_policies` | Every person covered by the policy. The holder is always enrolled with `relationship = SELF`; dependents are added separately. |
+| **Per-member coverage** | `membership_coverage_rules` | Optional per-member rule overrides. Absent service types fall back to the policy's default `coverage_rules`. Enables different copays, limits, or coverage percentages per dependent. |
 
 ```
 MEMBERS ──────────────────────────────────────────────────────────┐
@@ -303,11 +318,21 @@ MEMBERSHIP_POLICIES  (policy_id FK + member_id FK + UNIQUE)   │   │
    • relationship  SELF | SPOUSE | CHILD | OTHER_DEPENDENT     │   │
    • enrollment_date / termination_date                        │   │
    • status        ACTIVE | TERMINATED | SUSPENDED             │   │
-   └──────── member_id ─────────────────────────────────────────┘   │
-             policy_id ─────────────────────────────────────────────┘
+   │                                                           │   │
+   ▼ (optional)                                                │   │
+MEMBERSHIP_COVERAGE_RULES  (membership_id FK + UNIQUE per svc)│   │
+   • per-member overrides: coverage_%, copay, annual_limit     │   │
+   • absent service_type → falls back to COVERAGE_RULES        │   │
+   └──────── member_id ──────────────────────────────────────────┘   │
+             policy_id ──────────────────────────────────────────────┘
 ```
 
-**Indexes on `membership_policies`:**
+**Adjudication rule resolution order** (pure domain, no I/O):
+1. Check `membership_coverage_rules` for the claiming member's service type
+2. If found → use member-level override
+3. If not found → fall back to `coverage_rules` (policy default)
+
+**Indexes on `membership_policies` and `membership_coverage_rules`:**
 
 | Index | Purpose |
 |-------|---------|
@@ -315,6 +340,7 @@ MEMBERSHIP_POLICIES  (policy_id FK + member_id FK + UNIQUE)   │   │
 | `ix_membership_policies_member_id` | List all policies a member is enrolled in |
 | `ix_membership_policies_member_active` (partial, `status='ACTIVE'`) | Active-coverage check at claim submission — hot path |
 | `ix_membership_policies_policy_status` | Active-member roster per policy — admin/UI |
+| `ix_membership_coverage_rules_membership_id` | Rule look-up per membership during adjudication |
 
 ### PHI Fields
 
@@ -354,6 +380,7 @@ Composite and partial indexes were added to support production query patterns:
 | `policies(holder_member_id) WHERE status='ACTIVE'` | Active-policy lookup for the holder |
 | `membership_policies(member_id) WHERE status='ACTIVE'` | **Adjudication hot path** — active coverage check at claim submission |
 | `membership_policies(policy_id, status)` | Active-member roster per policy |
+| `membership_coverage_rules(membership_id)` | Per-member rule look-up during adjudication |
 | `line_items(claim_id, status)` | Line item rollup per claim |
 | `users(role, is_active)` | Admin user management table |
 

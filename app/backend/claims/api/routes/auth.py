@@ -302,9 +302,9 @@ async def activate_demo_insurance(
         session=session,
     )
 
-    # 2. Create demo policy covering the current year
+    # 2. Create demo policy covering the current year (holder auto-enrolled as SELF)
     await create_policy(
-        member_id=member.id,
+        holder_member_id=member.id,
         policy_number=f"POL-{uid_prefix}-{year}",
         effective_date=date(year, 1, 1),
         expiration_date=date(year, 12, 31),

@@ -93,6 +93,11 @@ class MembershipPolicy:
     created_at: datetime
     updated_at: datetime
 
+    # Per-member coverage rule overrides.
+    # Empty list means: use the policy's default coverage rules for all service types.
+    # When non-empty, each rule here overrides the matching policy rule for this member only.
+    coverage_rules: List["CoverageRule"] = field(default_factory=list)
+
     def is_active_on(self, service_date: date) -> bool:
         """Return True if this membership is active and covers the given date."""
         if self.status != "ACTIVE":
@@ -102,6 +107,13 @@ class MembershipPolicy:
         if self.termination_date and service_date > self.termination_date:
             return False
         return True
+
+    def rule_for(self, service_type) -> "Optional[CoverageRule]":
+        """
+        Return the member-specific override rule for a service type, or None if
+        this member uses the policy default for that service type.
+        """
+        return next((r for r in self.coverage_rules if r.service_type == service_type), None)
 
 
 @dataclass

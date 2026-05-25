@@ -15,16 +15,27 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from claims.api.schemas import (
+    AddMemberToPolicyRequest,
     CreateMemberRequest,
     CreatePolicyRequest,
     MemberResponse,
+    MembershipPolicyResponse,
     PolicyResponse,
 )
 from claims.api.deps import get_current_user, require_roles
-from claims.application.services import create_member, create_policy
+from claims.application.services import (
+    MemberAlreadyEnrolled,
+    MemberNotFound,
+    MembershipNotFound,
+    PolicyNotFound,
+    add_member_to_policy,
+    create_member,
+    create_policy,
+    remove_member_from_policy,
+)
 from claims.infrastructure.database import get_session
 from claims.infrastructure.models import UserORM
-from claims.infrastructure.repositories import MemberRepository, PolicyRepository
+from claims.infrastructure.repositories import MemberRepository, MembershipPolicyRepository, PolicyRepository
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Members & Policies"])
@@ -77,7 +88,7 @@ async def list_policies_endpoint(
     def _policy_resp(policy) -> PolicyResponse:
         return PolicyResponse(
             id=policy.id,
-            member_id=policy.member_id,
+            holder_member_id=policy.holder_member_id,
             policy_number=policy.policy_number,
             effective_date=policy.effective_date,
             expiration_date=policy.expiration_date,
@@ -152,7 +163,7 @@ async def create_policy_endpoint(
     current_user: UserORM = Depends(require_roles("ADMIN", "CLAIM_PROCESSOR")),
 ) -> PolicyResponse:
     policy = await create_policy(
-        member_id=request.member_id,
+        holder_member_id=request.holder_member_id,
         policy_number=request.policy_number,
         effective_date=request.effective_date,
         expiration_date=request.expiration_date,
@@ -163,7 +174,7 @@ async def create_policy_endpoint(
     )
     return PolicyResponse(
         id=policy.id,
-        member_id=policy.member_id,
+        holder_member_id=policy.holder_member_id,
         policy_number=policy.policy_number,
         effective_date=policy.effective_date,
         expiration_date=policy.expiration_date,
@@ -200,7 +211,7 @@ async def get_policy_endpoint(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Policy not found")
     return PolicyResponse(
         id=policy.id,
-        member_id=policy.member_id,
+        holder_member_id=policy.holder_member_id,
         policy_number=policy.policy_number,
         effective_date=policy.effective_date,
         expiration_date=policy.expiration_date,
@@ -220,3 +231,109 @@ async def get_policy_endpoint(
             for r in policy.coverage_rules
         ],
     )
+
+
+# ── Membership management endpoints ───────────────────────────────────────────
+
+
+def _membership_resp(m) -> MembershipPolicyResponse:
+    return MembershipPolicyResponse(
+        id=m.id,
+        policy_id=m.policy_id,
+        member_id=m.member_id,
+        relationship=m.relationship,
+        enrollment_date=m.enrollment_date,
+        termination_date=m.termination_date,
+        status=m.status,
+        coverage_rules=[
+            {
+                "service_type": r.service_type.value,
+                "coverage_percentage": str(r.coverage_percentage),
+                "annual_limit": str(r.annual_limit.amount) if r.annual_limit else None,
+                "per_visit_limit": str(r.per_visit_limit.amount) if r.per_visit_limit else None,
+                "copay": str(r.copay.amount) if r.copay else None,
+                "requires_preauth": r.requires_preauth,
+            }
+            for r in m.coverage_rules
+        ],
+    )
+
+
+@router.get(
+    "/policies/{policy_id}/members",
+    response_model=List[MembershipPolicyResponse],
+    summary="List all members enrolled in a policy (ADMIN / CLAIM_PROCESSOR only)",
+)
+async def list_policy_members_endpoint(
+    policy_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    current_user: UserORM = Depends(require_roles("ADMIN", "CLAIM_PROCESSOR")),
+) -> List[MembershipPolicyResponse]:
+    repo = MembershipPolicyRepository(session)
+    memberships = await repo.list_by_policy(policy_id)
+    return [_membership_resp(m) for m in memberships]
+
+
+@router.post(
+    "/policies/{policy_id}/members",
+    response_model=MembershipPolicyResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary=(
+        "Enroll a dependent under a policy (ADMIN / CLAIM_PROCESSOR only). "
+        "Optionally supply per-member coverage_rules to override policy defaults for this member."
+    ),
+)
+async def add_member_to_policy_endpoint(
+    policy_id: uuid.UUID,
+    request: AddMemberToPolicyRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: UserORM = Depends(require_roles("ADMIN", "CLAIM_PROCESSOR")),
+) -> MembershipPolicyResponse:
+    try:
+        membership = await add_member_to_policy(
+            policy_id=policy_id,
+            member_id=request.member_id,
+            relationship=request.relationship,
+            enrollment_date=request.enrollment_date,
+            coverage_rules=[r.model_dump() for r in request.coverage_rules] if request.coverage_rules else None,
+            session=session,
+        )
+    except PolicyNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except MemberNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except MemberAlreadyEnrolled as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    return _membership_resp(membership)
+
+
+@router.delete(
+    "/policies/{policy_id}/members/{member_id}",
+    response_model=MembershipPolicyResponse,
+    summary="Terminate a dependent's enrollment under a policy (ADMIN / CLAIM_PROCESSOR only)",
+)
+async def remove_member_from_policy_endpoint(
+    policy_id: uuid.UUID,
+    member_id: uuid.UUID,
+    termination_date: Optional[str] = None,
+    session: AsyncSession = Depends(get_session),
+    current_user: UserORM = Depends(require_roles("ADMIN", "CLAIM_PROCESSOR")),
+) -> MembershipPolicyResponse:
+    from datetime import date as date_type
+    term_date = (
+        date_type.fromisoformat(termination_date)
+        if termination_date
+        else date_type.today()
+    )
+    try:
+        membership = await remove_member_from_policy(
+            policy_id=policy_id,
+            member_id=member_id,
+            termination_date=term_date,
+            session=session,
+        )
+    except MembershipNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return _membership_resp(membership)

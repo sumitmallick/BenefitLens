@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
-from .entities import AdjudicationResult, AnnualUsage, LineItem, Policy
+from .entities import AdjudicationResult, AnnualUsage, CoverageRule, LineItem, MembershipPolicy, Policy
 from .value_objects import (
     DenialReason,
     DiagnosisCode,
@@ -44,18 +44,25 @@ class AdjudicationContext:
     """
     All data the adjudicator needs to make a decision.
     Assembled by the application service before calling adjudicate().
+
+    membership: the claimant's enrollment record for this policy.
+      When the membership has per-member coverage_rules, those override the
+      matching policy-level rules for this specific member.  Service types
+      with no member-level rule fall back to the policy default.
     """
-    __slots__ = ("policy", "annual_usage", "preauth_granted")
+    __slots__ = ("policy", "annual_usage", "preauth_granted", "membership")
 
     def __init__(
         self,
         policy: Policy,
         annual_usage: Optional[AnnualUsage],
         preauth_granted: bool = False,
+        membership: Optional[MembershipPolicy] = None,
     ) -> None:
         self.policy = policy
         self.annual_usage = annual_usage
         self.preauth_granted = preauth_granted
+        self.membership = membership
 
 
 def adjudicate(line_item: LineItem, ctx: AdjudicationContext) -> tuple[LineItem, AnnualUsage | None]:
@@ -97,7 +104,15 @@ def adjudicate(line_item: LineItem, ctx: AdjudicationContext) -> tuple[LineItem,
         ), None
 
     # ── Step 2: Service covered? ────────────────────────────────────────
-    rule = policy.rule_for(line_item.service_type)
+    # Member-level override takes precedence over the policy default.
+    # This allows dependents to have different copays, limits, or coverage
+    # percentages than the primary subscriber under the same policy.
+    rule: Optional[CoverageRule] = None
+    if ctx.membership is not None:
+        rule = ctx.membership.rule_for(line_item.service_type)
+    if rule is None:
+        rule = policy.rule_for(line_item.service_type)
+
     if rule is None:
         return _deny(
             line_item,

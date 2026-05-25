@@ -187,12 +187,17 @@ async def adjudicate_claim(claim_id: uuid.UUID, session: AsyncSession) -> Claim:
     """
     Run the adjudicator over all pending line items.
 
+    Loads the claimant's membership (with per-member coverage rules) and passes
+    it to AdjudicationContext so member-level overrides are applied before
+    falling back to policy defaults.
+
     Uses SELECT FOR UPDATE on AnnualUsage rows to prevent concurrent
     double-spend on annual limits. Each line item is processed in order;
     the annual limit is updated atomically per line item.
     """
     claim_repo = ClaimRepository(session)
     policy_repo = PolicyRepository(session)
+    membership_repo = MembershipPolicyRepository(session)
     usage_repo = AnnualUsageRepository(session)
 
     claim = await claim_repo.get(claim_id)
@@ -202,6 +207,9 @@ async def adjudicate_claim(claim_id: uuid.UUID, session: AsyncSession) -> Claim:
     policy = await policy_repo.get(claim.policy_id)
     if not policy:
         raise PolicyNotFound(f"Policy {claim.policy_id} not found")
+
+    # Load the claimant's membership so per-member coverage rules are available
+    membership = await membership_repo.get_by_policy_and_member(claim.policy_id, claim.member_id)
 
     # Transition claim to UNDER_REVIEW
     prev_status = claim.status
@@ -232,7 +240,7 @@ async def adjudicate_claim(claim_id: uuid.UUID, session: AsyncSession) -> Claim:
         else:
             usage = None
 
-        ctx = AdjudicationContext(policy=policy, annual_usage=usage)
+        ctx = AdjudicationContext(policy=policy, annual_usage=usage, membership=membership)
         li, updated_usage = adjudicate(li, ctx)
 
         if updated_usage:
@@ -481,6 +489,7 @@ async def add_member_to_policy(
     relationship: str,
     enrollment_date: date,
     session: AsyncSession,
+    coverage_rules: Optional[List[dict]] = None,
 ) -> MembershipPolicy:
     """
     Enroll a dependent (SPOUSE / CHILD / OTHER_DEPENDENT) under an existing policy.
@@ -506,6 +515,23 @@ async def add_member_to_policy(
             f"Member {member_id} is already enrolled in policy {policy_id}"
         )
 
+    # Build per-member coverage rule overrides (empty = use policy defaults for all service types)
+    member_rules = []
+    for r in (coverage_rules or []):
+        rule = CoverageRule(
+            id=uuid.uuid4(),
+            policy_id=policy_id,
+            service_type=ServiceType(r["service_type"]),
+            coverage_percentage=Decimal(str(r["coverage_percentage"])),
+            annual_limit=Money.of(str(r["annual_limit"])) if r.get("annual_limit") else None,
+            per_visit_limit=Money.of(str(r["per_visit_limit"])) if r.get("per_visit_limit") else None,
+            copay=Money.of(str(r["copay"])) if r.get("copay") else None,
+            requires_preauth=r.get("requires_preauth", False),
+            network_restriction=NetworkType(r.get("network_restriction", "ANY")),
+            excluded_diagnosis_codes=r.get("excluded_diagnosis_codes", []),
+        )
+        member_rules.append(rule)
+
     now = datetime.utcnow()
     membership = MembershipPolicy(
         id=uuid.uuid4(),
@@ -517,6 +543,7 @@ async def add_member_to_policy(
         status="ACTIVE",
         created_at=now,
         updated_at=now,
+        coverage_rules=member_rules,
     )
     await membership_repo.save(membership)
     return membership

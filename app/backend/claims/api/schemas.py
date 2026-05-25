@@ -104,6 +104,13 @@ class AddMemberToPolicyRequest(BaseModel):
         description="Relationship to the policy holder: SPOUSE | CHILD | OTHER_DEPENDENT",
     )
     enrollment_date: date = Field(..., description="Date coverage begins for this member")
+    coverage_rules: Optional[List[CoverageRuleRequest]] = Field(
+        None,
+        description=(
+            "Per-member coverage rule overrides. Omit to inherit all rules from the policy. "
+            "Supply only the service types you want to override; the rest fall back to policy defaults."
+        ),
+    )
 
 
 # ── Response schemas ──────────────────────────────────────────────────────
@@ -170,9 +177,23 @@ class MemberResponse(BaseModel):
     # date_of_birth and email omitted from response — minimal PHI exposure
 
 
+class MembershipPolicyResponse(BaseModel):
+    id: uuid.UUID
+    policy_id: uuid.UUID
+    member_id: uuid.UUID
+    relationship: str
+    enrollment_date: date
+    termination_date: Optional[date]
+    status: str
+    coverage_rules: List[dict] = Field(
+        default_factory=list,
+        description="Per-member coverage overrides. Empty = uses policy defaults for all service types.",
+    )
+
+
 class PolicyResponse(BaseModel):
     id: uuid.UUID
-    member_id: uuid.UUID
+    holder_member_id: uuid.UUID = Field(..., description="Primary subscriber (contract holder)")
     policy_number: str
     effective_date: date
     expiration_date: date

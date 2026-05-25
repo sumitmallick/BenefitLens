@@ -131,6 +131,48 @@ class MembershipPolicyORM(Base):
 
     policy: Mapped["PolicyORM"] = relationship("PolicyORM", back_populates="memberships")
     member: Mapped["MemberORM"] = relationship("MemberORM", back_populates="memberships")
+    # Per-member coverage rule overrides (loaded with membership; empty = use policy defaults)
+    coverage_rules: Mapped[List["MembershipCoverageRuleORM"]] = relationship(
+        "MembershipCoverageRuleORM", back_populates="membership", lazy="selectin",
+    )
+
+
+class MembershipCoverageRuleORM(Base):
+    """
+    Per-member coverage rule overrides.
+
+    When a member has a rule for a service_type here, the adjudicator uses it
+    instead of the policy-level CoverageRuleORM for that member.
+    Absent service types fall back to the policy default.
+
+    Example use cases:
+      - A child dependent's pediatric wellness is covered at 100% even though
+        the base policy covers it at 80%.
+      - A spouse has a different copay for specialist visits.
+      - An employee add-on rider increases mental health coverage.
+    """
+    __tablename__ = "membership_coverage_rules"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    membership_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("membership_policies.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    service_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    coverage_percentage: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
+    annual_limit: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    per_visit_limit: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    copay: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 2), nullable=True)
+    requires_preauth: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    network_restriction: Mapped[str] = mapped_column(String(32), nullable=False, default="ANY")
+    excluded_diagnosis_codes: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+
+    __table_args__ = (
+        UniqueConstraint("membership_id", "service_type", name="uq_member_rule_service_type"),
+    )
+
+    membership: Mapped["MembershipPolicyORM"] = relationship(
+        "MembershipPolicyORM", back_populates="coverage_rules",
+    )
 
 
 class CoverageRuleORM(Base):
