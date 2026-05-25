@@ -7,10 +7,9 @@ GET  /api/v1/auth/me         — current user profile
 GET  /api/v1/auth/users      — list all users (ADMIN only)
 PATCH /api/v1/auth/users/{id}/role — change user role (ADMIN only)
 """
-from __future__ import annotations
-
 import logging
 import uuid
+from datetime import date, datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -27,6 +26,7 @@ from claims.api.deps import (
     verify_password,
 )
 from claims.api.rate_limit import limiter
+from claims.application.services import create_member, create_policy
 from claims.infrastructure.database import get_session
 from claims.infrastructure.models import UserORM
 
@@ -253,3 +253,71 @@ async def deactivate_user(
     await session.commit()
     await session.refresh(user)
     return _user_response(user)
+
+
+_DEMO_COVERAGE_RULES = [
+    {"service_type": "SPECIALIST_VISIT", "coverage_percentage": 80, "requires_preauth": False, "annual_limit": 5000, "copay": 40},
+    {"service_type": "PREVENTIVE",       "coverage_percentage": 100, "requires_preauth": False, "annual_limit": 2000, "copay": 0},
+    {"service_type": "EMERGENCY",        "coverage_percentage": 90, "requires_preauth": False, "annual_limit": 50000, "copay": 150},
+    {"service_type": "MENTAL_HEALTH",    "coverage_percentage": 80, "requires_preauth": True,  "annual_limit": 3000, "copay": 30},
+    {"service_type": "LAB_WORK",         "coverage_percentage": 85, "requires_preauth": False, "annual_limit": 2500, "copay": 20},
+    {"service_type": "PHYSICAL_THERAPY", "coverage_percentage": 70, "requires_preauth": True,  "annual_limit": 2000, "copay": 40},
+    {"service_type": "IMAGING",          "coverage_percentage": 80, "requires_preauth": True,  "annual_limit": 5000, "copay": 75},
+]
+
+
+@router.post(
+    "/me/activate-demo",
+    response_model=UserResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Create a demo member + policy and link it to the current PATIENT account",
+)
+async def activate_demo_insurance(
+    current_user: UserORM = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> UserResponse:
+    """
+    Idempotent: if the user already has a member_id linked, returns the current
+    profile immediately with no side effects.
+
+    Creates:
+      1. A MemberORM record (PHI: uses the user's registered full name + email)
+      2. A PolicyORM covering the current benefit year with 7 service types
+      3. Sets users.member_id → the new member's UUID
+    """
+    # Already linked — nothing to do
+    if current_user.member_id is not None:
+        return _user_response(current_user)
+
+    today = datetime.now(timezone.utc).date()
+    year = today.year
+    uid_prefix = str(current_user.id).upper()[:8]
+
+    # 1. Create demo member record
+    member = await create_member(
+        member_id_str=f"MBR-{uid_prefix}",
+        name=current_user.full_name,
+        date_of_birth=date(year - 30, 6, 15),
+        email=current_user.email,
+        session=session,
+    )
+
+    # 2. Create demo policy covering the current year
+    await create_policy(
+        member_id=member.id,
+        policy_number=f"POL-{uid_prefix}-{year}",
+        effective_date=date(year, 1, 1),
+        expiration_date=date(year, 12, 31),
+        deductible_amount="500",
+        out_of_pocket_max="6000",
+        coverage_rules=_DEMO_COVERAGE_RULES,
+        session=session,
+    )
+
+    # 3. Link the new member to this user account
+    current_user.member_id = member.id
+    await session.commit()
+    await session.refresh(current_user)
+
+    logger.info("Demo insurance activated for user: role=%s", current_user.role)
+    return _user_response(current_user)

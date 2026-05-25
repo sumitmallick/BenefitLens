@@ -162,14 +162,34 @@ async def list_all_claims_endpoint(
         "Submit a claim with one or more line items. "
         "Adjudication runs synchronously and the response includes "
         "the adjudication result for each line item. "
-        "Allowed roles: ADMIN, CLAIM_PROCESSOR, PROVIDER."
+        "Allowed roles: ADMIN, CLAIM_PROCESSOR, PROVIDER, PATIENT. "
+        "PATIENT callers may only submit claims for their own member_id."
     ),
 )
 async def submit_claim_endpoint(
     request: SubmitClaimRequest,
     session: AsyncSession = Depends(get_session),
-    current_user: UserORM = Depends(require_roles("ADMIN", "CLAIM_PROCESSOR", "PROVIDER")),
+    current_user: UserORM = Depends(get_current_user),
 ) -> ClaimDetailResponse:
+    # PATIENT: can only submit for their own linked member
+    if current_user.role == "PATIENT":
+        if not current_user.member_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Your account does not have an insurance member record linked. "
+                       "Visit /my-insurance to activate your insurance first.",
+            )
+        if request.member_id != current_user.member_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Patients may only submit claims for their own member record.",
+            )
+    elif current_user.role not in ("ADMIN", "CLAIM_PROCESSOR", "PROVIDER"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Role '{current_user.role}' is not authorized to submit claims.",
+        )
+
     cmd = SubmitClaimCommand(
         member_id=request.member_id,
         policy_id=request.policy_id,

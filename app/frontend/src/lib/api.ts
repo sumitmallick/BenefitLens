@@ -271,6 +271,10 @@ export const authApi = {
 
   me: (): Promise<AuthUser> => request<AuthUser>("/api/v1/auth/me"),
 
+  /** Create a demo member + policy and link it to the current PATIENT account. Idempotent. */
+  activateDemo: (): Promise<AuthUser> =>
+    request<AuthUser>("/api/v1/auth/me/activate-demo", { method: "POST" }),
+
   listUsers: (): Promise<AuthUser[]> => request<AuthUser[]>("/api/v1/auth/users"),
 
   updateRole: (userId: string, role: string): Promise<AuthUser> =>
@@ -316,6 +320,9 @@ export const policiesApi = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+
+  getById: (id: string): Promise<Policy> =>
+    request<Policy>(`/api/v1/policies/${id}`),
 };
 
 // ─── Stats ────────────────────────────────────────────────────────────────────

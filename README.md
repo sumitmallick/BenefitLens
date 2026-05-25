@@ -34,12 +34,13 @@ ClaimsIQ processes, adjudicates, and explains insurance claims against member po
 6. [Adjudication Engine](#adjudication-engine)
 7. [Scheduled Jobs](#scheduled-jobs)
 8. [Quick Start](#quick-start)
-9. [Deployment Guide](#deployment-guide)
-10. [API Reference](#api-reference)
-11. [Environment Variables](#environment-variables)
-12. [Development Workflow](#development-workflow)
-13. [Security Considerations](#security-considerations)
-14. [License](#license)
+9. [End-to-End User Flows](#end-to-end-user-flows)
+10. [Deployment Guide](#deployment-guide)
+11. [API Reference](#api-reference)
+12. [Environment Variables](#environment-variables)
+13. [Development Workflow](#development-workflow)
+14. [Security Considerations](#security-considerations)
+15. [License](#license)
 
 ---
 
@@ -316,7 +317,7 @@ ClaimsIQ uses **JWT bearer tokens** (python-jose, RS256-ready) with a **role-bas
 | Action | ADMIN | CLAIM_PROCESSOR | PATIENT | PROVIDER |
 |--------|:-----:|:---------------:|:-------:|:--------:|
 | View all claims | Yes | Yes | Own only | Own NPI |
-| Submit claims | Yes | Yes | No | Yes |
+| Submit claims | Yes | Yes | Own only | Yes (own member) |
 | Resolve disputes | Yes | Yes | No | No |
 | Register members | Yes | Yes | No | No |
 | User management | Yes | No | No | No |
@@ -465,6 +466,220 @@ TOKEN=$(curl -s -X POST http://localhost:8000/api/v1/auth/login \
 # View platform statistics
 curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/stats
 ```
+
+---
+
+## End-to-End User Flows
+
+This section walks through every page of the ClaimsIQ UI for each role. Start the platform with `make dev && make migrate && make seed`, then open http://localhost:3000.
+
+### Demo Accounts
+
+| Role | Email | Password |
+|------|-------|----------|
+| Admin | admin@claimsiq.com | Admin1234! |
+| Claim Processor | processor@claimsiq.com | Processor1! |
+| Provider | provider@citymed.com | Provider1! |
+| Patient | patient@example.com | Patient1! |
+
+---
+
+### Role: ADMIN
+
+The Admin sees the full platform — stats, all claims, all members, all disputes, and user management.
+
+#### 1. Dashboard (`/`)
+
+- Displays live platform statistics: total claims, approval rate, this-month submissions.
+- Four quick-action cards: **New Claim**, **Register Member**, **Member Directory**, **Disputes**.
+- Recent claims table shows all claims across all members.
+
+#### 2. Submit a Claim (`/claims/new`)
+
+- Fill **Member ID** and **Policy ID** (copy from Member Directory or Demo Setup).
+- Enter **Provider Name** and **NPI** (10 digits).
+- Add one or more line items: service type, ICD-10 diagnosis code, CPT procedure code, billed amount, service date.
+- Click **Submit Claim** — adjudication runs immediately server-side.
+- Redirects to the claim detail page showing per-line-item coverage decisions.
+
+#### 3. Claims List (`/claims`)
+
+- Shows all claims across every member.
+- Filter by status (SUBMITTED, APPROVED, DENIED, etc.).
+- Click any row → Claim Detail.
+
+#### 4. Claim Detail (`/claims/[id]`)
+
+- Full adjudication breakdown per line item: covered amount, denial reason, deductible applied, copay applied.
+- **Explain** tab gives a plain-English explanation per line item.
+- **Dispute** button files a dispute for the whole claim or a specific line item.
+
+#### 5. Member Directory (`/members`)
+
+- Table of all registered members.
+- Each row shows member name and plan-issued member ID.
+- **Register Member** button opens the new-member form.
+
+#### 6. Register Member (`/members/new`)
+
+- Fields: Full Name, Date of Birth, Plan-issued Member ID, Contact Email.
+- On submit creates the member record (PHI fields encrypted at rest).
+- Shows the generated UUID — copy it for policy creation.
+
+#### 7. Policies (`/policies` — or via Members)
+
+- Lists all policies with effective date, expiration date, status, deductible.
+- **Create Policy** links a policy to an existing member with configurable coverage rules.
+
+#### 8. Disputes (`/disputes`)
+
+- Lists all open and resolved disputes.
+- Click **Resolve** → enter outcome (UPHELD / DENIED) and resolution notes.
+
+#### 9. User Management (`/admin/users`)
+
+- Full user table: email, name, role, active status.
+- Change any user's role (dropdown).
+- Deactivate accounts.
+- This page is **Admin-only** — other roles receive a 403.
+
+#### 10. Demo Setup (`/demo`)
+
+- One-click provisioning: creates a test member (Alex Johnson) + comprehensive policy.
+- Displays generated Member ID and Policy ID with copy buttons.
+- **Submit a Claim with These IDs** button pre-fills the claim form.
+
+---
+
+### Role: CLAIM_PROCESSOR
+
+Same as Admin minus User Management. The Claim Processor's primary workflow is the claim queue and dispute resolution.
+
+#### Typical daily flow
+
+1. **Login** → Dashboard shows today's submission count and approval rate.
+2. **Claims** → filter by `SUBMITTED` → work through unreviewed claims.
+3. **Claim Detail** → review adjudication breakdown → escalate to `UNDER_REVIEW` if manual review needed.
+4. **Disputes** → resolve pending disputes: read member's reason, check adjudication, enter UPHELD/DENIED + notes.
+5. **Member Directory** → register new members as enrollment requests arrive.
+6. **Demo Setup** → quickly provision test data for QA or demos.
+
+**Pages available:** Dashboard, Submit Claim, Claims List, Claim Detail, Members, Register Member, Policies, Create Policy, Disputes, Demo Setup.
+
+**Pages not available:** User Management (`/admin/users`) — redirects with "Admin access required".
+
+---
+
+### Role: PROVIDER
+
+Providers submit claims under their NPI and see only claims filed from their NPI.
+
+#### 1. Dashboard (`/`)
+
+- Shows only the **Submit a Claim** quick-action card (no stats, no member management).
+- Recent claims table is scoped to this provider's NPI.
+
+#### 2. Submit a Claim (`/claims/new`)
+
+- **Requires a Member ID and Policy ID** from the patient's insurer.
+- Enter the NPI (pre-filled with the provider's registered NPI if available).
+- Add clinical line items (service type, diagnosis, procedure, billed amount).
+- Submit → immediate adjudication → review covered vs. denied line items.
+
+#### 3. Claims List (`/claims`)
+
+- Scoped to claims submitted under this provider's NPI only.
+- Can see status, adjudication result, and dispute status.
+
+#### 4. Claim Detail + Disputes
+
+- View the full adjudication breakdown for each claim.
+- File a dispute if coverage was incorrectly denied.
+
+**Pages not available:** Member Directory, Register Member, Policies, User Management, Demo Setup (redirects with "Staff Access Required").
+
+---
+
+### Role: PATIENT
+
+Patients have a self-service portal: insurance card, claim history, disputes.
+
+#### 1. Dashboard (`/`)
+
+- Welcome card showing the patient's name and role.
+- Quick-action card: **My Insurance** (to view their insurance card and submit a claim).
+- Recent claims table scoped to their linked member record.
+- No stats, no member management, no admin actions.
+
+#### 2. My Insurance (`/my-insurance`)
+
+**If insurance is not yet linked (new patient):**
+
+- Shows a **pending activation** preview with:
+  - A frosted-glass insurance card showing the patient's actual name and a "PENDING" badge.
+  - Sample coverage table (7 service types) mirroring a real Silver-tier plan.
+  - Sample deductible tracker at $0.
+  - 4-step activation guide with the patient's registered email shown in a code block.
+  - A hidden activation shortcut: navigate to `/activate-insurance` to instantly provision a demo member + policy.
+
+**If insurance is linked:**
+
+- Digital insurance card (dark blue gradient) showing:
+  - Member name, Plan-issued Member ID, Policy Number
+  - Effective date, expiration date, policy status badge
+- Deductible progress bar (amount met / total deductible).
+- Out-of-Pocket Maximum progress bar.
+- Full coverage rules table (service type, coverage %, copay, annual limit, preauth required).
+- **Submit a Claim** button — pre-fills Member ID and Policy ID automatically.
+
+#### 3. Activate Insurance (`/activate-insurance`) — hidden
+
+- Not shown in sidebar navigation — access by direct URL only.
+- On page load, automatically calls `POST /api/v1/auth/me/activate-demo`:
+  - Creates a demo MemberORM record using the patient's registered name.
+  - Creates a PolicyORM for the current benefit year with 7 service types.
+  - Links the new member UUID to `users.member_id`.
+- Shows a spinner ("Activating your insurance…"), then a green checkmark.
+- Redirects to `/my-insurance` where the patient now sees their live insurance card.
+- **Idempotent**: if the patient already has insurance linked, redirects immediately without creating duplicate records.
+
+#### 4. Submit a Claim (`/claims/new`) — patient-specific flow
+
+- Member ID and Policy ID are **auto-fetched** from the patient's linked record and shown as a read-only summary card — no manual copy-paste required.
+- Patient fills in: Provider Name, Provider NPI, and line items.
+- If no insurance is linked, shows an "Insurance not linked" full-page message with a link to `/my-insurance`.
+
+#### 5. Claims History (`/claims`)
+
+- Lists only the patient's own claims (scoped by member_id).
+- Shows claim status, date, total billed vs. total covered.
+- Click → Claim Detail with adjudication breakdown and plain-English explanations.
+
+#### 6. File a Dispute
+
+- From Claim Detail → click **Dispute** on a denied or partially-covered line item.
+- Enter reason (minimum 10 characters).
+- Dispute goes to Claim Processor queue for review.
+- Patient can track dispute status in the claim detail view.
+
+---
+
+### Page → Role Access Matrix
+
+| Page | ADMIN | CLAIM_PROCESSOR | PROVIDER | PATIENT |
+|------|:-----:|:---------------:|:--------:|:-------:|
+| Dashboard `/` | Full stats | Full stats | Scoped | Welcome card |
+| My Insurance `/my-insurance` | — | — | — | Full portal |
+| Activate Insurance `/activate-insurance` | Redirect `/` | Redirect `/` | Redirect `/` | Self-service |
+| Submit Claim `/claims/new` | Yes | Yes | Yes | Auto-fill |
+| Claims List `/claims` | All | All | Own NPI | Own only |
+| Claim Detail `/claims/[id]` | Yes | Yes | Own NPI | Own only |
+| Disputes `/disputes` | Yes | Yes | — | Via claim detail |
+| Member Directory `/members` | Yes | Yes | — | — |
+| Register Member `/members/new` | Yes | Yes | — | — |
+| Policies `/policies` | Yes | Yes | — | — |
+| Demo Setup `/demo` | Yes | Yes | Blocked | Blocked |
+| User Management `/admin/users` | Yes | Blocked | Blocked | Blocked |
 
 ---
 

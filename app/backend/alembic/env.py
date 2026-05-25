@@ -77,6 +77,12 @@ def run_migrations_online() -> None:
     """
     Run migrations against a live PostgreSQL connection.
     NullPool prevents connection leaks during one-shot migration runs.
+
+    Advisory lock note: pg_advisory_xact_lock is transaction-scoped and is
+    automatically released on commit/rollback — no explicit unlock needed.
+    It must be acquired *inside* context.begin_transaction() so it lives in
+    the same transaction as the DDL, avoiding the SQLAlchemy 2.x autobegin
+    nested-savepoint trap that would silently roll back the schema changes.
     """
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
@@ -84,20 +90,17 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
-        # Lock the alembic_version table so concurrent migration attempts
-        # (e.g. multiple pod startups) don't race each other.
-        connection.execute(text("SELECT pg_advisory_lock(1234567890)"))
-        try:
-            context.configure(
-                connection=connection,
-                target_metadata=target_metadata,
-                compare_type=True,
-                compare_server_default=True,
-            )
-            with context.begin_transaction():
-                context.run_migrations()
-        finally:
-            connection.execute(text("SELECT pg_advisory_unlock(1234567890)"))
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=True,
+            compare_server_default=True,
+        )
+        with context.begin_transaction():
+            # Transaction-scoped lock — prevents concurrent migration races
+            # (e.g. multiple pod startups). Released automatically on commit.
+            connection.execute(text("SELECT pg_advisory_xact_lock(1234567890)"))
+            context.run_migrations()
 
 
 if context.is_offline_mode():

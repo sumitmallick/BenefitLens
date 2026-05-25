@@ -49,9 +49,10 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
             path=request.url.path,
         )
 
+        response: Response | None = None
         start = time.perf_counter()
         try:
-            response: Response = await call_next(request)
+            response = await call_next(request)
         except Exception:
             logger.exception(
                 "unhandled_exception",
@@ -60,7 +61,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
             raise
         finally:
             duration_ms = round((time.perf_counter() - start) * 1000, 2)
-            status = getattr(response, "status_code", 500)
+            status = response.status_code if response is not None else 500
 
             # Skip health check noise
             if request.url.path not in ("/health", "/"):
@@ -73,5 +74,6 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
                     duration_ms=duration_ms,
                 )
 
-        response.headers["X-Request-ID"] = request_id
+        if response is not None:
+            response.headers["X-Request-ID"] = request_id
         return response

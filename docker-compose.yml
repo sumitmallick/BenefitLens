@@ -80,17 +80,19 @@ services:
   frontend:
     build:
       context: .
-      dockerfile: infrastructure/docker/Dockerfile.frontend
+      dockerfile: infrastructure/docker/Dockerfile.frontend.dev
     container_name: claims-frontend
     ports:
       - "3000:3000"
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:8000
+      WATCHPACK_POLLING: "true"   # required for hot-reload through Docker Desktop volume mounts
     depends_on:
       backend:
         condition: service_healthy
-    # Note: no volume mount for frontend — standalone build bakes everything in.
-    # For hot-reload in dev, run: cd app/frontend && npm run dev
+    volumes:
+      - ./app/frontend:/app        # source mount — Next.js Fast Refresh picks up every save
+      - /app/node_modules          # anonymous volume keeps container node_modules intact
 
   # ── Kafka (optional — event streaming) ────────────────────────────────
   # Uncomment to enable Kafka-based domain event publishing.

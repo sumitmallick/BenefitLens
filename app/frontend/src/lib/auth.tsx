@@ -35,6 +35,8 @@ interface AuthContextValue {
   logout: () => void;
   /** Called after register so both user+token land in context at once */
   setSession: (user: AuthUser, token: string) => void;
+  /** Update in-memory user (e.g. after demo activation links a member_id) without re-login */
+  updateUser: (user: AuthUser) => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -107,8 +109,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     document.cookie = "claimsiq_session=1; path=/; SameSite=Lax; max-age=86400";
   };
 
+  const updateUser = (updated: AuthUser) => {
+    setUser(updated);
+  };
+
   return (
-    <AuthContext.Provider value={{ user, token, isLoading, login, logout, setSession }}>
+    <AuthContext.Provider value={{ user, token, isLoading, login, logout, setSession, updateUser }}>
       {children}
     </AuthContext.Provider>
   );
@@ -129,7 +135,7 @@ export function getStoredToken(): string | null {
 /** Role-based permission helpers */
 export const can = {
   viewAllClaims: (role: UserRole) => role === "ADMIN" || role === "CLAIM_PROCESSOR",
-  submitClaims: (role: UserRole) => role === "ADMIN" || role === "CLAIM_PROCESSOR" || role === "PROVIDER",
+  submitClaims: (role: UserRole) => role === "ADMIN" || role === "CLAIM_PROCESSOR" || role === "PROVIDER" || role === "PATIENT",
   manageMembersAndPolicies: (role: UserRole) => role === "ADMIN" || role === "CLAIM_PROCESSOR",
   resolveDisputes: (role: UserRole) => role === "ADMIN" || role === "CLAIM_PROCESSOR",
   manageUsers: (role: UserRole) => role === "ADMIN",

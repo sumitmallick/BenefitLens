@@ -23,7 +23,7 @@ and replayable from an event log.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -80,7 +80,7 @@ def adjudicate(line_item: LineItem, ctx: AdjudicationContext) -> tuple[LineItem,
     """
     policy = ctx.policy
     result_id = uuid.uuid4()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     # ── Step 1: Policy active? ──────────────────────────────────────────
     if not policy.is_active_on(line_item.service_date):

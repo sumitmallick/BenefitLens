@@ -149,7 +149,7 @@ class DiagnosisCode:
     def __post_init__(self) -> None:
         cleaned = self.code.strip().upper()
         object.__setattr__(self, "code", cleaned)
-        if not re.match(r"^[A-Z][0-9]{2}(\.[0-9A-Z]{1,4})?$", cleaned):
+        if not re.match(r"^[A-Z][0-9]{2}(\.[0-9A-Z]{1,4}|[0-9A-Z]{1,4})?$", cleaned):
             raise ValueError(f"Invalid ICD-10 diagnosis code format: {cleaned!r}")
 
     def __str__(self) -> str:

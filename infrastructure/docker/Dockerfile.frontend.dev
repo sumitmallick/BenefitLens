@@ -1,0 +1,24 @@
+# ── Frontend dev image ──────────────────────────────────────────────────────
+# Lightweight image for local development.
+# - Mounts ./app/frontend as a volume (see docker-compose.yml)
+# - Runs `npm run dev` with Next.js Fast Refresh (no rebuild on save)
+# - node_modules live inside the container (anonymous volume) so the host
+#   folder doesn't shadow them.
+#
+# Production builds use Dockerfile.frontend (multi-stage standalone).
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install dependencies first (layer-cached — only re-runs when package.json changes)
+COPY app/frontend/package.json app/frontend/package-lock.json ./
+RUN npm ci
+
+EXPOSE 3000
+
+ENV NODE_ENV=development
+ENV NEXT_TELEMETRY_DISABLED=1
+# Polling ensures file-change events propagate through Docker Desktop volume mounts on macOS/Windows
+ENV WATCHPACK_POLLING=true
+
+CMD ["npm", "run", "dev"]
