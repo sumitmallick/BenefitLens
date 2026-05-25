@@ -26,6 +26,7 @@ from claims.domain.entities import (
     Dispute,
     LineItem,
     Member,
+    MembershipPolicy,
     Policy,
 )
 from claims.domain.value_objects import (
@@ -49,6 +50,7 @@ from .models import (
     DomainEventORM,
     LineItemORM,
     MemberORM,
+    MembershipPolicyORM,
     PolicyORM,
 )
 
@@ -77,7 +79,7 @@ def _map_coverage_rule(orm: CoverageRuleORM) -> CoverageRule:
 def _map_policy(orm: PolicyORM) -> Policy:
     return Policy(
         id=orm.id,
-        member_id=orm.member_id,
+        holder_member_id=orm.holder_member_id,
         policy_number=orm.policy_number,
         effective_date=orm.effective_date,
         expiration_date=orm.expiration_date,
@@ -87,6 +89,20 @@ def _map_policy(orm: PolicyORM) -> Policy:
         out_of_pocket_max=_money(orm.out_of_pocket_max),
         oop_used=Money(orm.oop_used) if orm.oop_used is not None else Money.zero(),
         coverage_rules=[_map_coverage_rule(r) for r in orm.coverage_rules],
+    )
+
+
+def _map_membership(orm: MembershipPolicyORM) -> MembershipPolicy:
+    return MembershipPolicy(
+        id=orm.id,
+        policy_id=orm.policy_id,
+        member_id=orm.member_id,
+        relationship=orm.relationship,
+        enrollment_date=orm.enrollment_date,
+        termination_date=orm.termination_date,
+        status=orm.status,
+        created_at=orm.created_at,
+        updated_at=orm.updated_at,
     )
 
 
@@ -123,13 +139,20 @@ def _map_line_item(orm: LineItemORM) -> LineItem:
 def _map_member(orm: MemberORM) -> Member:
     enc = get_encryptor()
     from datetime import date as date_type
+    # Collect all policies this member is enrolled in (as holder or dependent)
+    # orm.memberships is selectin-loaded; each membership carries its policy via join
+    policies = [
+        _map_policy(m.policy)
+        for m in orm.memberships
+        if m.policy is not None
+    ]
     return Member(
         id=orm.id,
         member_id=enc.decrypt(orm.phi_member_id),
         name=enc.decrypt(orm.phi_name),
         date_of_birth=date_type.fromisoformat(enc.decrypt(orm.phi_date_of_birth)),
         email=enc.decrypt(orm.phi_email),
-        policies=[_map_policy(p) for p in orm.policies],
+        policies=policies,
     )
 
 
@@ -210,7 +233,23 @@ class PolicyRepository:
         return _map_policy(result) if result else None
 
     async def get_by_member(self, member_id: uuid.UUID) -> List[Policy]:
-        stmt = select(PolicyORM).where(PolicyORM.member_id == member_id)
+        """
+        Return all policies the member is enrolled in — as holder OR dependent.
+        Queries via membership_policies so dependents see their coverage too.
+        Only returns policies with an ACTIVE membership row for this member.
+        """
+        stmt = (
+            select(PolicyORM)
+            .join(MembershipPolicyORM, MembershipPolicyORM.policy_id == PolicyORM.id)
+            .where(MembershipPolicyORM.member_id == member_id)
+            .where(MembershipPolicyORM.status == "ACTIVE")
+        )
+        result = await self._session.execute(stmt)
+        return [_map_policy(p) for p in result.scalars().all()]
+
+    async def get_by_holder(self, holder_member_id: uuid.UUID) -> List[Policy]:
+        """Return policies where this member is the primary subscriber (contract holder)."""
+        stmt = select(PolicyORM).where(PolicyORM.holder_member_id == holder_member_id)
         result = await self._session.execute(stmt)
         return [_map_policy(p) for p in result.scalars().all()]
 
@@ -240,7 +279,7 @@ class PolicyRepository:
         else:
             orm = PolicyORM(
                 id=policy.id,
-                member_id=policy.member_id,
+                holder_member_id=policy.holder_member_id,
                 policy_number=policy.policy_number,
                 effective_date=policy.effective_date,
                 expiration_date=policy.expiration_date,
@@ -265,6 +304,86 @@ class PolicyRepository:
                     excluded_diagnosis_codes=rule.excluded_diagnosis_codes,
                 )
                 self._session.add(rule_orm)
+
+
+class MembershipPolicyRepository:
+    """
+    Manages member enrollment records under a policy.
+
+    Key invariants:
+      - The primary subscriber always has a SELF enrollment row (created by
+        PolicyRepository.save via the application service).
+      - A member can only be enrolled once per policy (UNIQUE constraint).
+      - Terminating a membership sets status=TERMINATED + termination_date;
+        the row is never deleted so the audit trail is preserved.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get(self, membership_id: uuid.UUID) -> Optional[MembershipPolicy]:
+        result = await self._session.get(MembershipPolicyORM, membership_id)
+        return _map_membership(result) if result else None
+
+    async def get_by_policy_and_member(
+        self, policy_id: uuid.UUID, member_id: uuid.UUID
+    ) -> Optional[MembershipPolicy]:
+        stmt = select(MembershipPolicyORM).where(
+            MembershipPolicyORM.policy_id == policy_id,
+            MembershipPolicyORM.member_id == member_id,
+        )
+        result = await self._session.execute(stmt)
+        orm = result.scalar_one_or_none()
+        return _map_membership(orm) if orm else None
+
+    async def has_active_membership(
+        self, policy_id: uuid.UUID, member_id: uuid.UUID
+    ) -> bool:
+        """
+        Fast boolean check — used at claim submission to guard against a member
+        submitting a claim against a policy they are not (or no longer) enrolled in.
+        Hits ix_membership_policies_member_active partial index.
+        """
+        stmt = select(MembershipPolicyORM.id).where(
+            MembershipPolicyORM.policy_id == policy_id,
+            MembershipPolicyORM.member_id == member_id,
+            MembershipPolicyORM.status == "ACTIVE",
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none() is not None
+
+    async def list_by_policy(self, policy_id: uuid.UUID) -> List[MembershipPolicy]:
+        stmt = select(MembershipPolicyORM).where(
+            MembershipPolicyORM.policy_id == policy_id,
+        ).order_by(MembershipPolicyORM.enrollment_date)
+        result = await self._session.execute(stmt)
+        return [_map_membership(m) for m in result.scalars().all()]
+
+    async def list_active_by_policy(self, policy_id: uuid.UUID) -> List[MembershipPolicy]:
+        stmt = select(MembershipPolicyORM).where(
+            MembershipPolicyORM.policy_id == policy_id,
+            MembershipPolicyORM.status == "ACTIVE",
+        ).order_by(MembershipPolicyORM.enrollment_date)
+        result = await self._session.execute(stmt)
+        return [_map_membership(m) for m in result.scalars().all()]
+
+    async def save(self, membership: MembershipPolicy) -> None:
+        existing = await self._session.get(MembershipPolicyORM, membership.id)
+        if existing:
+            existing.status = membership.status
+            existing.termination_date = membership.termination_date
+            existing.updated_at = membership.updated_at
+        else:
+            orm = MembershipPolicyORM(
+                id=membership.id,
+                policy_id=membership.policy_id,
+                member_id=membership.member_id,
+                relationship=membership.relationship,
+                enrollment_date=membership.enrollment_date,
+                termination_date=membership.termination_date,
+                status=membership.status,
+            )
+            self._session.add(orm)
 
 
 class AnnualUsageRepository:

@@ -1,0 +1,467 @@
+================================================================================
+  ClaimsIQ — INTERVIEW PRESENTATION GUIDE
+================================================================================
+
+
+WHAT IS CLAIMSIQ?
+-----------------
+ClaimsIQ is an enterprise-grade insurance claims adjudication and management
+platform — the backend system that health insurers use to decide whether a
+medical claim is approved, denied, or partially covered, and by how much.
+
+Real-world equivalents: Availity, Change Healthcare, Epic, AthenaHealth.
+
+The project demonstrates a production-quality system (not a toy) built from
+scratch — with hexagonal architecture, HIPAA-aligned PHI handling, a
+deterministic adjudication engine, full RBAC, observability, and a
+patient-facing UI.
+
+
+================================================================================
+  THE STACK
+================================================================================
+
+Layer           Technology                       Why It Matters to Say
+---------------------------------------------------------------------------
+Frontend        Next.js 14, TypeScript, Tailwind  App Router, React Query
+Backend         FastAPI, Python 3.12, async        Pydantic v2, async SQLAlchemy
+Database        PostgreSQL 16                      NUMERIC(12,2) for money,
+                                                   SELECT FOR UPDATE, indexes
+Cache           Redis 7                            Coverage rule cache-aside,
+                                                   rate limiting
+Events          Kafka (optional)                   Domain event streaming,
+                                                   outbox pattern
+Infra           Docker Compose → K8s/Helm          Full progressive deploy path
+                → Terraform (AWS)
+Observability   Prometheus + Loki + Grafana        Structured JSON logs,
+                (PLG stack)                        pre-built dashboard
+CI/CD           GitHub Actions                     Test → lint → Trivy CVE
+                                                   scan → Helm deploy
+
+
+================================================================================
+  ARCHITECTURE — THE KEY TALKING POINT
+================================================================================
+
+The pattern is Hexagonal (Ports & Adapters). Draw this on a whiteboard:
+
+  ┌─────────────────────────────────────────────┐
+  │  API Layer                                  │
+  │  FastAPI routes · Pydantic schemas · RBAC   │
+  └───────────────────┬─────────────────────────┘
+                      │
+  ┌───────────────────▼─────────────────────────┐
+  │  Application Layer                          │
+  │  services.py · orchestrates use cases       │
+  │  owns transaction boundaries                │
+  └───────────────────┬─────────────────────────┘
+                      │
+  ┌───────────────────▼─────────────────────────┐
+  │  Domain Layer  (pure Python — zero I/O)     │
+  │  Adjudicator · Entities · Value Objects     │
+  │  State Machines · Domain Events             │
+  └───────────────────┬─────────────────────────┘
+                      │
+  ┌───────────────────▼─────────────────────────┐
+  │  Infrastructure Layer                       │
+  │  SQLAlchemy ORM · Redis · Kafka · Fernet    │
+  └─────────────────────────────────────────────┘
+
+THE ONE RULE THAT MAKES THIS REAL:
+The domain layer has zero imports from infrastructure. You can run all domain
+tests without Docker, PostgreSQL, or Redis — they complete in under 1 second.
+
+WHY THIS MATTERS IN AN INTERVIEW:
+"This means the adjudication logic is independently testable and the storage
+layer is swappable. If we needed to move from PostgreSQL to DynamoDB, nothing
+in the business logic changes."
+
+
+================================================================================
+  THE ADJUDICATION ENGINE — CORE BUSINESS LOGIC
+================================================================================
+
+File: app/backend/claims/domain/adjudicator.py
+
+This is the most important piece to explain. It runs a 10-step deterministic
+decision sequence on every line item:
+
+  Step 1   Is the policy active on the service date?
+  Step 2   Is this service type covered?
+  Step 3   Is the diagnosis code excluded?
+  Step 4   Is pre-authorization required but missing?
+  Step 5   Is the annual limit exhausted?  ← SELECT FOR UPDATE here
+  Step 6   Does per-visit limit cap the amount?
+  Step 7   Apply deductible (if not yet met)
+  Step 8   Apply copay
+  Step 9   Apply coverage percentage
+  Step 10  Persist result + emit domain event
+
+KEY DESIGN DECISION TO MENTION:
+Steps 1–5 are denial gates — the first failing gate short-circuits.
+Steps 6–9 are financial calculations.
+Every result carries a prose explanation in plain English, not just a code.
+
+THE CONCURRENCY PROBLEM IT SOLVES:
+Two concurrent claims for the same (policy_id, service_type, year) could both
+see a non-exhausted annual limit and both approve — a classic double-spend.
+Fixed with SELECT FOR UPDATE (pessimistic lock) on the annual_usages row.
+The second request blocks until the first commits, then re-reads the balance.
+
+
+================================================================================
+  WHERE EVERY FILE LIVES
+================================================================================
+
+BACKEND  (app/backend/claims/)
+-------------------------------
+
+domain/
+  adjudicator.py      10-step engine, pure Python, no I/O
+  entities.py         Claim, Policy, Member, LineItem dataclasses
+  value_objects.py    Money (wraps Decimal), DiagnosisCode, ServiceType
+  state_machines.py   Claim lifecycle: SUBMITTED → APPROVED / DENIED / DISPUTED
+  events.py           ClaimSubmitted, ClaimAdjudicated, ClaimStatusChanged
+
+application/
+  services.py         submit_claim, create_member, create_policy
+                      These are the transaction owners — no HTTP here
+
+infrastructure/
+  models.py           SQLAlchemy ORM (PHI columns prefixed phi_, encrypted)
+  repositories.py     MemberRepository, PolicyRepository, ClaimRepository
+  encryption.py       Fernet AES-128-CBC for all PHI fields
+  cache.py            Redis coverage rule cache-aside
+  database.py         Async SQLAlchemy engine, get_session dependency
+
+api/
+  routes/auth.py      register, login, /me, activate-demo, user management
+  routes/claims.py    submit, list, detail, explain, mark-paid
+  routes/members.py   list/create members, list/create policies
+  routes/disputes.py  file dispute, resolve dispute
+  schemas.py          Pydantic request/response models (separate from domain)
+  deps.py             get_current_user, require_roles, JWT verification
+  middleware.py       RequestIDMiddleware: request_id on every log line
+
+alembic/versions/
+  0001_initial        Core tables
+  0002_users          Users table, RBAC columns
+  0003_indexes        7 composite indexes for production query patterns
+  0004_*              Audit log table
+
+
+FRONTEND  (app/frontend/src/)
+------------------------------
+
+app/
+  page.tsx                      Dashboard (role-aware: stats for staff,
+                                welcome card for patient)
+  login/page.tsx                JWT login form
+  register/page.tsx             Account registration
+  claims/
+    page.tsx                    Claims list (scoped by role)
+    new/page.tsx                Submit claim form + collapsible filing guide
+    [id]/page.tsx               Claim detail + adjudication breakdown
+    [id]/explain/page.tsx       Plain-English explanation per line item
+    [id]/dispute/page.tsx       File a dispute
+  members/
+    page.tsx                    Member directory (staff only)
+    new/page.tsx                Register member
+  my-insurance/page.tsx         Patient portal: digital insurance card
+  activate-insurance/page.tsx   Hidden: auto-provisions demo member+policy
+  demo/page.tsx                 Staff: one-click test data provisioning
+  admin/users/page.tsx          Admin: user management + role changes
+
+lib/
+  auth.tsx    AuthContext — JWT, login/logout, setSession, updateUser,
+              RBAC can helpers
+  api.ts      All API calls: authApi, claimsApi, membersApi,
+              policiesApi, disputesApi
+
+components/
+  Sidebar.tsx       Role-aware nav (patient sees My Insurance,
+                    staff see Members)
+  LayoutShell.tsx   App shell with sidebar
+  StatusBadge.tsx   Claim/policy status colour badges
+  ErrorAlert.tsx    Consistent error display
+
+
+INFRASTRUCTURE  (infrastructure/)
+-----------------------------------
+
+docker/
+  Dockerfile.backend          Production FastAPI image
+  Dockerfile.frontend.dev     Dev image (npm run dev + WATCHPACK_POLLING)
+  Dockerfile.frontend         Production Next.js standalone build
+
+helm/claims-system/           Full Helm chart:
+                              Deployment, HPA, Ingress, CronJob templates,
+                              NetworkPolicy, PDB, ServiceAccount
+
+kubernetes/                   Raw K8s manifests
+
+terraform/                    EKS + RDS + ElastiCache + MSK + ALB +
+                              ECR + S3 + IAM + VPC
+
+observability/
+  prometheus/alerts.yml       SLO alerts: error rate, latency p99
+  grafana/dashboards/         Pre-built dashboard: request rate,
+                              approval rate, log stream
+  loki/ + promtail/           Log aggregation pipeline
+
+
+TESTS  (app/backend/tests/)
+-----------------------------
+
+domain/
+  test_adjudicator.py     Unit tests: all 10 adjudication steps, edge cases
+  test_state_machines.py  Valid/invalid claim lifecycle transitions
+
+api/
+  test_claims_api.py      Integration: real PostgreSQL, full claim lifecycle
+  test_disputes_api.py    Integration: dispute filing and resolution
+
+conftest.py               Async test fixtures, test DB setup
+
+
+================================================================================
+  RBAC — FOUR ROLES, HARD ENFORCED
+================================================================================
+
+Role              What They Can Do
+---------------------------------------------------------------------------
+ADMIN             Everything + user management + platform stats
+CLAIM_PROCESSOR   All claims + disputes + member/policy management
+PROVIDER          Submit claims under their NPI, view own NPI claims only
+PATIENT           Own claims only, own insurance portal, submit
+                  reimbursement claims for their linked member record
+
+TWO-LAYER ENFORCEMENT:
+  1. Route-level:  require_roles FastAPI dependency rejects wrong roles
+                   before any query runs
+  2. Query-level:  Repositories filter by member_id or provider_npi
+
+A patient guessing another member's UUID in the URL gets a 403 —
+it's not just UI gating.
+
+
+================================================================================
+  PHI (PROTECTED HEALTH INFORMATION) HANDLING
+================================================================================
+
+Every field containing personal health data is:
+
+  - Prefixed phi_ in the ORM model
+    (e.g. phi_name, phi_date_of_birth, phi_diagnosis_code)
+
+  - Encrypted at rest with Fernet AES-128-CBC + HMAC-SHA256
+    before writing to PostgreSQL
+
+  - Stripped from all log output by a structlog processor (_phi_filter)
+
+  - Excluded from list endpoints — only detail endpoints return
+    diagnosis codes
+
+KEY LINE TO SAY:
+"A DBA with direct table access cannot read any member name, date of birth,
+email, or diagnosis code without the PHI_ENCRYPTION_KEY."
+
+
+================================================================================
+  DEMO ACCOUNTS
+================================================================================
+
+Role              Email                     Password
+---------------------------------------------------------------------------
+Admin             admin@claimsiq.com        Admin1234!
+Claim Processor   processor@claimsiq.com    Processor1!
+Provider          provider@citymed.com      Provider1!
+Patient           patient@example.com       Patient1!
+
+
+================================================================================
+  HOW TO DEMO LIVE  (5-minute walkthrough)
+================================================================================
+
+URL: http://localhost:3000
+
+1. Login as admin@claimsiq.com
+   → Show the stats dashboard, member directory, claims queue
+
+2. Go to /demo
+   → Click "Run Demo Setup"
+   → Show generated Member ID + Policy ID with copy buttons
+
+3. Click "Submit a Claim with These IDs"
+   → Form pre-fills member and policy
+   → Add a line item:
+       Service Type: LAB WORK
+       Diagnosis Code: Z090
+       Procedure Code: 80053
+       Billed Amount: $200
+   → Submit
+
+4. Show claim detail
+   → Adjudication result per line item
+   → Covered amount, deductible applied, copay, plain-English explanation
+
+5. Logout → Login as patient@example.com
+   → Show patient dashboard (no staff UI, no stats, no member directory)
+
+6. Go to /my-insurance
+   → Show the "Pending Activation" state with sample coverage preview
+
+7. Navigate to /activate-insurance in the browser address bar
+   → Watch spinner → green checkmark → auto-redirect
+   → Live insurance card appears with real member ID and policy
+
+8. Click "Submit a Claim" from the insurance card
+   → Member ID and Policy ID are pre-filled automatically
+
+9. Open http://localhost:8000/docs
+   → Show full Swagger API surface (all endpoints, schemas, try-it-out)
+
+
+================================================================================
+  STRONG ANSWERS TO LIKELY INTERVIEW QUESTIONS
+================================================================================
+
+"Why hexagonal architecture?"
+  The adjudication engine is pure Python with zero I/O. I can run 50 domain
+  tests in under a second without any infrastructure. The storage layer is
+  swappable — if we needed to move to a different database, the business
+  logic doesn't change at all.
+
+"How do you handle concurrent claims hitting the same annual limit?"
+  Annual benefit limits are a shared mutable resource. Two concurrent requests
+  could both read a non-exhausted limit and both approve — a classic
+  double-spend. I use SELECT FOR UPDATE on the annual_usages row — pessimistic
+  locking at the database level — so the second request blocks until the first
+  commits, then re-reads the updated balance. Optimistic retry would add
+  complexity without benefit for this hot-row contention pattern.
+
+"How do you protect PHI?"
+  All PHI columns are Fernet-encrypted at the application layer before hitting
+  the database. The encryption key is injected as an environment variable,
+  never stored in the DB. Structlog strips all phi_* keys before rendering log
+  lines. List endpoints omit diagnosis codes entirely — they only appear in
+  detail views behind proper access control.
+
+"How does this scale?"
+  Redis caches coverage rules — they're read on every line item adjudication
+  but change rarely. Composite indexes on (member_id, status),
+  (provider_npi, submitted_at), and a partial index on active policies only.
+  Kubernetes HPA scales the backend pod at 70% CPU. Kafka decouples claim
+  adjudication from downstream billing and notification services so a slow
+  consumer doesn't block the synchronous API response.
+
+"How do you ensure correctness?"
+  TDD — domain tests written before implementation. The adjudicator is a pure
+  function: deterministic, no side effects, no I/O — every step is unit-
+  testable in isolation. Integration tests use a real PostgreSQL database,
+  not mocks. ICD-10 and CPT codes are validated as value objects in the domain
+  layer so invalid codes never reach the database or produce silent bad data.
+
+"What would you add next?"
+  Refresh token support + Redis token blocklist for immediate revocation.
+  Async Kafka consumer for downstream billing events. Benefit-year rollover
+  CronJob (the K8s template exists, just needs the approval gate). Per-member
+  deductible tracking UI. AWS KMS envelope encryption to replace the static
+  Fernet key in environment variables.
+
+
+================================================================================
+  WHAT WAS BUILT / FIXED IN THE MOST RECENT SESSION
+================================================================================
+
+These are recent changes — the interviewer may ask about current work:
+
+Backend
+  - Fix datetime.utcnow() deprecation (adjudicator.py)
+  - Fix SQLAlchemy 2.x autobegin trap in Alembic migrations
+    (pg_advisory_xact_lock inside begin_transaction)
+  - Fix UnboundLocalError in RequestIDMiddleware
+  - Add POST /auth/me/activate-demo — idempotent, creates demo member +
+    policy + links member_id to the current PATIENT account
+  - Allow PATIENT role to submit claims; enforce they can only claim
+    against their own member record (not other members' UUIDs)
+  - Broaden ICD-10 validation regex to accept both Z09.0 (with dot)
+    and Z090 (without dot) — the no-dot format is standard in
+    electronic claim systems (X12 EDI 837)
+
+Frontend
+  - Fix patient dashboard showing staff-only UI (member directory, stats)
+  - Add /my-insurance: digital insurance card with deductible tracker
+    and coverage table; pending-activation preview for unlinked patients
+  - Add hidden /activate-insurance: auto-provisions demo data on load,
+    updates auth context, redirects to /my-insurance
+  - Restore /demo page (was deleted; recreated with correct API fields)
+  - Add My Insurance to patient sidebar nav
+  - Add updateUser() to AuthContext for in-memory updates without re-login
+  - Add collapsible filing guide to claim form:
+      ICD-10 code reference table
+      CPT procedure code reference table
+      NPI explanation
+      Post-submit flow (5 steps)
+      Disclaimer (amber callout, PHI warning)
+  - Auto-uppercase diagnosis code input; inline helper text on key fields
+
+Infrastructure
+  - Add Dockerfile.frontend.dev for hot-reload dev image
+  - Update docker-compose.yml to use dev image with volume mounts
+    and WATCHPACK_POLLING=true for macOS Docker Desktop compatibility
+
+Docs
+  - Add End-to-End User Flows section to README for all 4 roles
+  - Role x Page access matrix
+
+
+================================================================================
+  GIT HISTORY (most recent first)
+================================================================================
+
+91bbe5b  fix: show claim filing guide expanded by default
+a9f296b  feat: patient portal, RBAC fixes, claim form guide, ICD-10 validation
+979b209  feat: OOP max, cache-aside, rate limiting, audit log, alerting
+77da9e5  docs: add .env.example with all environment variables
+2ac0b40  chore: untrack settings, remove demo page
+dfedeb0  feat: observability stack, structured logging, TDD + debug agents
+dc325ab  feat: auth+RBAC, scale schema, ClaimsIQ branding, enterprise README
+f9d54bc  feat: frontend, infrastructure, documentation, CI/CD
+04f7a12  feat: infrastructure, application service, and API layers
+ea7c4df  feat: core claims domain model
+78b7530  test: state machine and adjudicator tests before implementation (TDD)
+
+
+================================================================================
+  QUICK START COMMANDS
+================================================================================
+
+make dev          # Start all services (Docker Compose)
+make migrate      # Apply Alembic migrations
+make seed         # Create the four demo accounts
+make test         # Run full test suite
+make lint         # ruff + mypy + tsc --noEmit
+make obs          # Start with full Prometheus + Loki + Grafana stack
+
+Service URLs:
+  Frontend      http://localhost:3000
+  Backend API   http://localhost:8000
+  Swagger UI    http://localhost:8000/docs
+  Grafana       http://localhost:3001  (admin / admin)
+  Prometheus    http://localhost:9090
+
+
+================================================================================
+
+ ┌─────────────────┬────────────────────────┬─────────────┐                                                                      
+  │      Role       │         Email          │  Password   │                                                                                        
+  ├─────────────────┼────────────────────────┼─────────────┤                                                                                        
+  │ Admin           │ admin@claimsiq.com     │ Admin1234!  │                                                                                        
+  ├─────────────────┼────────────────────────┼─────────────┤                                                                                        
+  │ Claim Processor │ processor@claimsiq.com │ Processor1! │                                                                                        
+  ├─────────────────┼────────────────────────┼─────────────┤
+  │ Provider        │ provider@citymed.com   │ Provider1!  │                                                                                        
+  ├─────────────────┼────────────────────────┼─────────────┤                                                                                        
+  │ Patient         │ patient@example.com    │ Patient1!   │
+  └─────────────────┴────────────────────────┴─────────────┘            

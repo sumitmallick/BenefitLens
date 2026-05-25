@@ -134,6 +134,7 @@ erDiagram
         text phi_date_of_birth "Fernet encrypted"
         text phi_email "Fernet encrypted"
         timestamp created_at
+        timestamp updated_at
     }
 
     USERS {
@@ -150,14 +151,29 @@ erDiagram
 
     POLICIES {
         uuid id PK
-        uuid member_id FK
-        text policy_number
+        uuid holder_member_id FK "Primary subscriber (contract owner)"
+        text policy_number UK
         date effective_date
         date expiration_date
-        enum status
+        enum status "ACTIVE|EXPIRED|CANCELLED"
         numeric deductible_amount "NUMERIC(12,2)"
-        boolean deductible_met
-        numeric out_of_pocket_max
+        numeric deductible_met "NUMERIC(12,2)"
+        numeric out_of_pocket_max "NUMERIC(12,2) nullable"
+        numeric oop_used "NUMERIC(12,2)"
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    MEMBERSHIP_POLICIES {
+        uuid id PK
+        uuid policy_id FK
+        uuid member_id FK
+        enum relationship "SELF|SPOUSE|CHILD|OTHER_DEPENDENT"
+        date enrollment_date "Coverage start for this member"
+        date termination_date "nullable — NULL means still active"
+        enum status "ACTIVE|TERMINATED|SUSPENDED"
+        timestamp created_at
+        timestamp updated_at
     }
 
     COVERAGE_RULES {
@@ -165,11 +181,11 @@ erDiagram
         uuid policy_id FK
         text service_type
         numeric coverage_percentage "NUMERIC(5,2)"
-        numeric annual_limit
-        numeric per_visit_limit
-        numeric copay
+        numeric annual_limit "nullable"
+        numeric per_visit_limit "nullable"
+        numeric copay "nullable"
         boolean requires_preauth
-        text network_restriction
+        text network_restriction "ANY|IN_NETWORK|PREFERRED"
         jsonb excluded_diagnosis_codes
     }
 
@@ -190,6 +206,7 @@ erDiagram
         timestamp submitted_at
         text provider_name
         text provider_npi
+        timestamp updated_at
     }
 
     LINE_ITEMS {
@@ -208,7 +225,7 @@ erDiagram
         uuid id PK
         uuid line_item_id FK "UNIQUE"
         numeric covered_amount
-        text denial_reason
+        text denial_reason "nullable"
         text explanation
         numeric deductible_applied
         numeric copay_applied
@@ -218,12 +235,12 @@ erDiagram
     DISPUTES {
         uuid id PK
         uuid claim_id FK
-        uuid line_item_id FK "nullable"
+        uuid line_item_id "nullable"
         text reason
         enum status
         timestamp submitted_at
-        timestamp resolved_at
-        text resolution_notes
+        timestamp resolved_at "nullable"
+        text resolution_notes "nullable"
     }
 
     DOMAIN_EVENTS {
@@ -234,9 +251,26 @@ erDiagram
         jsonb payload
     }
 
-    MEMBERS ||--o{ POLICIES : "has"
+    AUDIT_LOGS {
+        uuid id PK
+        timestamp timestamp
+        uuid user_id "nullable"
+        text user_email "nullable"
+        text user_role "nullable"
+        text action
+        text resource_type
+        uuid resource_id "nullable"
+        text ip_address "nullable"
+        text request_id "nullable"
+        text http_method "nullable"
+        text http_path "nullable"
+    }
+
+    MEMBERS ||--o{ MEMBERSHIP_POLICIES : "enrolled via"
+    MEMBERS ||--o{ POLICIES : "holds (as primary subscriber)"
     MEMBERS ||--o{ CLAIMS : "files"
     USERS }o--o| MEMBERS : "linked to"
+    POLICIES ||--o{ MEMBERSHIP_POLICIES : "covers"
     POLICIES ||--o{ COVERAGE_RULES : "defines"
     POLICIES ||--o{ ANNUAL_USAGES : "tracks"
     POLICIES ||--o{ CLAIMS : "governs"
@@ -244,8 +278,43 @@ erDiagram
     CLAIMS ||--o{ DISPUTES : "subject to"
     CLAIMS ||--o{ DOMAIN_EVENTS : "generates"
     LINE_ITEMS ||--o| ADJUDICATION_RESULTS : "produces"
-    LINE_ITEMS ||--o{ DISPUTES : "targeted by"
 ```
+
+### Policy ↔ Member Relationship (Migration 0005)
+
+Prior to migration 0005, `policies.member_id` pointed directly to one member, encoding a one-to-one policy/member relationship that couldn't model group or family plans.
+
+The current design separates two concerns:
+
+| Concept | Column / Table | Meaning |
+|---------|---------------|---------|
+| **Primary subscriber** | `policies.holder_member_id` | The person who holds the contract and is responsible for premiums. One policy has exactly one holder. |
+| **Enrolled members** | `membership_policies` | Every person covered by the policy. The holder is always enrolled with `relationship = SELF`; dependents are added separately. |
+
+```
+MEMBERS ──────────────────────────────────────────────────────────┐
+   │  (holder_member_id)                                           │
+   │  1 member can hold many policies                              │
+   ▼                                                               │
+POLICIES ─────────────────────────────────────────────────────┐   │
+   │  1 policy covers many members                             │   │
+   ▼                                                           │   │
+MEMBERSHIP_POLICIES  (policy_id FK + member_id FK + UNIQUE)   │   │
+   • relationship  SELF | SPOUSE | CHILD | OTHER_DEPENDENT     │   │
+   • enrollment_date / termination_date                        │   │
+   • status        ACTIVE | TERMINATED | SUSPENDED             │   │
+   └──────── member_id ─────────────────────────────────────────┘   │
+             policy_id ─────────────────────────────────────────────┘
+```
+
+**Indexes on `membership_policies`:**
+
+| Index | Purpose |
+|-------|---------|
+| `ix_membership_policies_policy_id` | List all members enrolled in a policy |
+| `ix_membership_policies_member_id` | List all policies a member is enrolled in |
+| `ix_membership_policies_member_active` (partial, `status='ACTIVE'`) | Active-coverage check at claim submission — hot path |
+| `ix_membership_policies_policy_status` | Active-member roster per policy — admin/UI |
 
 ### PHI Fields
 
@@ -273,7 +342,7 @@ This serializes concurrent adjudications on the same benefit bucket at the datab
 
 ### Composite Indexes (Migration 0003)
 
-Seven composite indexes were added to support production query patterns:
+Composite and partial indexes were added to support production query patterns:
 
 | Index | Query Pattern |
 |-------|---------------|
@@ -281,7 +350,10 @@ Seven composite indexes were added to support production query patterns:
 | `claims(provider_npi, submitted_at)` | Provider portal — paginated submission history |
 | `claims(status, submitted_at)` | Processor queue — ordered work queue by status |
 | `disputes(claim_id, status)` | Dispute lookup per claim |
-| `policies(member_id) WHERE status='ACTIVE'` | Adjudication hot path — partial index, active only |
+| `policies(holder_member_id)` | Holder's policy list |
+| `policies(holder_member_id) WHERE status='ACTIVE'` | Active-policy lookup for the holder |
+| `membership_policies(member_id) WHERE status='ACTIVE'` | **Adjudication hot path** — active coverage check at claim submission |
+| `membership_policies(policy_id, status)` | Active-member roster per policy |
 | `line_items(claim_id, status)` | Line item rollup per claim |
 | `users(role, is_active)` | Admin user management table |
 

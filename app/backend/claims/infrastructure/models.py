@@ -47,7 +47,15 @@ class MemberORM(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    policies: Mapped[List["PolicyORM"]] = relationship("PolicyORM", back_populates="member", lazy="selectin")
+    # Policies where this member is the primary subscriber (contract holder)
+    held_policies: Mapped[List["PolicyORM"]] = relationship(
+        "PolicyORM", back_populates="holder_member", lazy="select",
+        foreign_keys="PolicyORM.holder_member_id",
+    )
+    # All policies this member is enrolled in (as holder OR dependent)
+    memberships: Mapped[List["MembershipPolicyORM"]] = relationship(
+        "MembershipPolicyORM", back_populates="member", lazy="selectin",
+    )
     claims: Mapped[List["ClaimORM"]] = relationship("ClaimORM", back_populates="member", lazy="selectin")
 
 
@@ -55,7 +63,12 @@ class PolicyORM(Base):
     __tablename__ = "policies"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    member_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("members.id"), nullable=False, index=True)
+    # Primary subscriber — the person who holds the contract and owns the benefit year accumulators.
+    # Multiple members may be enrolled under this policy via membership_policies.
+    holder_member_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("members.id"), nullable=False, index=True,
+        comment="Primary subscriber (contract holder)",
+    )
     policy_number: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     effective_date: Mapped[date] = mapped_column(Date, nullable=False)
     expiration_date: Mapped[date] = mapped_column(Date, nullable=False)
@@ -69,12 +82,55 @@ class PolicyORM(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    member: Mapped["MemberORM"] = relationship("MemberORM", back_populates="policies")
+    holder_member: Mapped["MemberORM"] = relationship(
+        "MemberORM", back_populates="held_policies", foreign_keys=[holder_member_id],
+    )
+    # All enrollment records for this policy (one per covered member)
+    memberships: Mapped[List["MembershipPolicyORM"]] = relationship(
+        "MembershipPolicyORM", back_populates="policy", lazy="select",
+    )
     coverage_rules: Mapped[List["CoverageRuleORM"]] = relationship(
         "CoverageRuleORM", back_populates="policy", lazy="selectin"
     )
     annual_usages: Mapped[List["AnnualUsageORM"]] = relationship("AnnualUsageORM", back_populates="policy")
     claims: Mapped[List["ClaimORM"]] = relationship("ClaimORM", back_populates="policy")
+
+
+class MembershipPolicyORM(Base):
+    """
+    Junction table: one row per (member, policy) enrollment.
+
+    The primary subscriber is always present with relationship='SELF'.
+    Dependents are added via the membership management API.
+
+    termination_date=None means coverage is still active for this member.
+    status mirrors the administrative state; use is_active_on() for date-aware checks.
+    """
+    __tablename__ = "membership_policies"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    policy_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("policies.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    member_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("members.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    relationship: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="SELF",
+        comment="SELF | SPOUSE | CHILD | OTHER_DEPENDENT",
+    )
+    enrollment_date: Mapped[date] = mapped_column(Date, nullable=False)
+    termination_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="ACTIVE")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("policy_id", "member_id", name="uq_membership_policy_member"),
+    )
+
+    policy: Mapped["PolicyORM"] = relationship("PolicyORM", back_populates="memberships")
+    member: Mapped["MemberORM"] = relationship("MemberORM", back_populates="memberships")
 
 
 class CoverageRuleORM(Base):

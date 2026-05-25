@@ -88,13 +88,22 @@ class CoverageRuleRequest(BaseModel):
 
 
 class CreatePolicyRequest(BaseModel):
-    member_id: uuid.UUID
+    holder_member_id: uuid.UUID = Field(..., description="Primary subscriber — the member who holds the contract")
     policy_number: str = Field(..., min_length=1, max_length=64)
     effective_date: date
     expiration_date: date
     deductible_amount: Decimal = Field(..., ge=0)
     out_of_pocket_max: Decimal = Field(..., gt=0)
     coverage_rules: List[CoverageRuleRequest] = Field(..., min_length=1)
+
+
+class AddMemberToPolicyRequest(BaseModel):
+    member_id: uuid.UUID = Field(..., description="Member to enroll as a dependent")
+    relationship: str = Field(
+        ...,
+        description="Relationship to the policy holder: SPOUSE | CHILD | OTHER_DEPENDENT",
+    )
+    enrollment_date: date = Field(..., description="Date coverage begins for this member")
 
 
 # ── Response schemas ──────────────────────────────────────────────────────

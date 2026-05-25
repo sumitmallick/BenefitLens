@@ -31,6 +31,7 @@ from claims.domain.entities import (
     Dispute,
     LineItem,
     Member,
+    MembershipPolicy,
     Policy,
 )
 from claims.domain.events import ClaimStatusChanged, ClaimSubmitted, LineItemAdjudicated
@@ -54,6 +55,7 @@ from claims.infrastructure.repositories import (
     ClaimRepository,
     DisputeRepository,
     MemberRepository,
+    MembershipPolicyRepository,
     PolicyRepository,
 )
 
@@ -109,13 +111,18 @@ async def submit_claim(cmd: SubmitClaimCommand, session: AsyncSession) -> Claim:
     """
     Submit a new claim.
 
-    Validates policy existence and membership. Does NOT adjudicate yet —
-    adjudication runs as a separate step so it can be async/queued.
-    For this implementation, adjudication is triggered immediately after
-    submission (synchronous for simplicity; see decisions.md).
+    Validates that the member exists and has an active enrollment under the
+    referenced policy (via membership_policies).  Any enrolled member —
+    holder or dependent — may submit a claim against a policy they are
+    covered by.
+
+    Does NOT adjudicate yet — adjudication runs as a separate step so it
+    can be async/queued.  For this implementation, adjudication is triggered
+    immediately after submission (synchronous for simplicity; see decisions.md).
     """
     member_repo = MemberRepository(session)
     policy_repo = PolicyRepository(session)
+    membership_repo = MembershipPolicyRepository(session)
     claim_repo = ClaimRepository(session)
 
     # Validate member
@@ -123,11 +130,12 @@ async def submit_claim(cmd: SubmitClaimCommand, session: AsyncSession) -> Claim:
     if not member:
         raise MemberNotFound(f"Member {cmd.member_id} not found")
 
-    # Validate policy belongs to member
+    # Validate policy exists and this member is actively enrolled under it
     policy = await policy_repo.get(cmd.policy_id)
-    if not policy or policy.member_id != cmd.member_id:
+    enrolled = await membership_repo.has_active_membership(cmd.policy_id, cmd.member_id)
+    if not policy or not enrolled:
         raise PolicyNotFound(
-            f"Policy {cmd.policy_id} not found for member {cmd.member_id}"
+            f"Policy {cmd.policy_id} not found or member {cmd.member_id} is not enrolled"
         )
 
     claim_id = uuid.uuid4()
@@ -386,7 +394,7 @@ async def create_member(
 
 
 async def create_policy(
-    member_id: uuid.UUID,
+    holder_member_id: uuid.UUID,
     policy_number: str,
     effective_date: date,
     expiration_date: date,
@@ -395,7 +403,15 @@ async def create_policy(
     coverage_rules: List[dict],
     session: AsyncSession,
 ) -> Policy:
+    """
+    Create a new policy and automatically enroll the holder as SELF.
+
+    The holder's SELF membership row is the canonical enrollment record.
+    Additional members (spouse, dependents) are added separately via
+    add_member_to_policy().
+    """
     policy_repo = PolicyRepository(session)
+    membership_repo = MembershipPolicyRepository(session)
 
     rules = []
     for r in coverage_rules:
@@ -420,7 +436,7 @@ async def create_policy(
 
     policy = Policy(
         id=policy_id,
-        member_id=member_id,
+        holder_member_id=holder_member_id,
         policy_number=policy_number,
         effective_date=effective_date,
         expiration_date=expiration_date,
@@ -432,4 +448,111 @@ async def create_policy(
     )
 
     await policy_repo.save(policy)
+
+    # Auto-enroll the holder as SELF — always the first membership row
+    now = datetime.utcnow()
+    holder_membership = MembershipPolicy(
+        id=uuid.uuid4(),
+        policy_id=policy_id,
+        member_id=holder_member_id,
+        relationship="SELF",
+        enrollment_date=effective_date,
+        termination_date=None,
+        status="ACTIVE",
+        created_at=now,
+        updated_at=now,
+    )
+    await membership_repo.save(holder_membership)
+
     return policy
+
+
+class MembershipNotFound(Exception):
+    pass
+
+
+class MemberAlreadyEnrolled(Exception):
+    pass
+
+
+async def add_member_to_policy(
+    policy_id: uuid.UUID,
+    member_id: uuid.UUID,
+    relationship: str,
+    enrollment_date: date,
+    session: AsyncSession,
+) -> MembershipPolicy:
+    """
+    Enroll a dependent (SPOUSE / CHILD / OTHER_DEPENDENT) under an existing policy.
+
+    Raises MemberAlreadyEnrolled if a membership row already exists for this
+    (policy, member) pair — prevents duplicate enrollments.
+    """
+    policy_repo = PolicyRepository(session)
+    member_repo = MemberRepository(session)
+    membership_repo = MembershipPolicyRepository(session)
+
+    policy = await policy_repo.get(policy_id)
+    if not policy:
+        raise PolicyNotFound(f"Policy {policy_id} not found")
+
+    member = await member_repo.get(member_id)
+    if not member:
+        raise MemberNotFound(f"Member {member_id} not found")
+
+    existing = await membership_repo.get_by_policy_and_member(policy_id, member_id)
+    if existing:
+        raise MemberAlreadyEnrolled(
+            f"Member {member_id} is already enrolled in policy {policy_id}"
+        )
+
+    now = datetime.utcnow()
+    membership = MembershipPolicy(
+        id=uuid.uuid4(),
+        policy_id=policy_id,
+        member_id=member_id,
+        relationship=relationship,
+        enrollment_date=enrollment_date,
+        termination_date=None,
+        status="ACTIVE",
+        created_at=now,
+        updated_at=now,
+    )
+    await membership_repo.save(membership)
+    return membership
+
+
+async def remove_member_from_policy(
+    policy_id: uuid.UUID,
+    member_id: uuid.UUID,
+    termination_date: date,
+    session: AsyncSession,
+) -> MembershipPolicy:
+    """
+    Terminate a member's enrollment under a policy.
+
+    Sets status=TERMINATED and records the termination_date.
+    The SELF (holder) enrollment cannot be terminated independently —
+    terminate the policy itself instead.
+    The row is retained for audit purposes; it is never deleted.
+    """
+    membership_repo = MembershipPolicyRepository(session)
+
+    membership = await membership_repo.get_by_policy_and_member(policy_id, member_id)
+    if not membership:
+        raise MembershipNotFound(
+            f"No enrollment found for member {member_id} in policy {policy_id}"
+        )
+
+    if membership.relationship == "SELF":
+        raise InvalidClaimState(
+            "Cannot terminate the holder's SELF enrollment directly. "
+            "Cancel the policy to remove all members."
+        )
+
+    now = datetime.utcnow()
+    membership.status = "TERMINATED"
+    membership.termination_date = termination_date
+    membership.updated_at = now
+    await membership_repo.save(membership)
+    return membership

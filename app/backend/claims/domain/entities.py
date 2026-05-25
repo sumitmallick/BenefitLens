@@ -72,16 +72,53 @@ class CoverageRule:
 # ---------------------------------------------------------------------------
 
 @dataclass
+class MembershipPolicy:
+    """
+    A member's enrollment record under a specific policy.
+
+    A policy can cover multiple members: the primary subscriber (SELF) plus
+    any dependents (SPOUSE, CHILD, OTHER_DEPENDENT) added later.
+
+    enrollment_date: when this member's coverage began under the policy.
+    termination_date: None means coverage is still active.
+    status: ACTIVE | TERMINATED | SUSPENDED
+    """
+    id: uuid.UUID
+    policy_id: uuid.UUID
+    member_id: uuid.UUID
+    relationship: str           # SELF | SPOUSE | CHILD | OTHER_DEPENDENT
+    enrollment_date: date
+    termination_date: Optional[date]
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+    def is_active_on(self, service_date: date) -> bool:
+        """Return True if this membership is active and covers the given date."""
+        if self.status != "ACTIVE":
+            return False
+        if service_date < self.enrollment_date:
+            return False
+        if self.termination_date and service_date > self.termination_date:
+            return False
+        return True
+
+
+@dataclass
 class Policy:
     """
-    The contract between the insurer and the member.
+    The contract between the insurer and the primary subscriber.
+
+    holder_member_id: the primary subscriber who holds the contract and is
+        responsible for premiums.  Multiple members can be enrolled under this
+        policy via the membership_policies table.
 
     deductible_amount: the annual deductible the member must meet before
         the insurer starts paying (applies to non-preventive services).
     deductible_met: accumulated amount credited toward the deductible this year.
     """
     id: uuid.UUID
-    member_id: uuid.UUID
+    holder_member_id: uuid.UUID
     policy_number: str
     effective_date: date
     expiration_date: date
